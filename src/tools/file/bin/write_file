@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+
+import os,sys
+import argparse
+import select
+
+# @yaml
+# write_file:
+# signature: ｜
+#     write_file "<path>" << 'end_of_write'
+#     <content>
+#     end_of_write
+# docstring: writes the given content to the given file. The content is terminated by a line with only end_of_write on it, so make sure your indentation is formatted properly. If the file does not exist, it will be created. If the file exists, it will be overwritten. 
+# arguments:
+#     - name: path
+#     type: string
+#     description: the path to the file to write to
+#     required: true
+#     - name: content
+#     type: string
+#     description: the content to write to the file. Must be terminated by a line with only end_of_write on it
+#     required: true
+
+usage = "Usage: write_file \"path\" << 'end_of_write'\n<Your content Here>\nend_of_write"
+
+
+def read_with_timeout(timeout_sec):
+    # Check if stdin is a readable stream, `timeout_sec` is the timeout in seconds
+    rlist, _, _ = select.select([sys.stdin], [], [], timeout_sec)
+    if rlist:  # If there is data to read
+        return sys.stdin.read()
+    else:  # Timeout occurred
+        raise TimeoutError("No input received within the timeout period")
+
+parser = argparse.ArgumentParser("write_file", description="Write the given content to the file at the given path. This command saves content to your specified file, creating it if it doesn't exist or overwriting its current contents if it does. Use it to reliably store generated content in a file. It would be helpful if you want to save the content you generated to a file.")
+parser.add_argument("path", help="the path of file you want to write", type=str)
+
+parser = parser.parse_args()
+
+file_path = parser.path
+try:
+    content = read_with_timeout(3)
+except TimeoutError as e:
+    raise Exception(f"{e}\n{usage}")
+
+if not os.path.exists(file_path):
+    file_dir = os.path.dirname(file_path)
+    if not os.path.exists(file_dir):
+        raise Exception(f"{file_dir} is not a regular file directory")
+
+with open(file_path, "w") as f:
+    f.write(content)
+print(f"Saved to {file_path}.\n")
+
+os.chmod(file_path, mode=0o755)
+exit(0)

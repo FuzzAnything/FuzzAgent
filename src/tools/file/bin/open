@@ -1,0 +1,62 @@
+#!/bin/bash
+
+# Source the defaults to get helper functions
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/defaults.sh"
+
+# @yaml
+# signature: open "<path>" [<line_number>]
+# docstring: opens the file at the given path in the editor. If line_number is provided, the window will be move to include that line
+# arguments:
+#   path:
+#     type: string
+#     description: the path to the file to open
+#     required: true
+#   line_number:
+#     type: integer
+#     description: the line number to move the window to (if not provided, the window will start at the top of the file)
+#     required: false
+open() {
+    if [ -z "$1" ]
+    then
+        echo "Usage: open \"<file>\""
+        return
+    fi
+    # Check if the second argument is provided
+    if [ -n "$2" ]; then
+        # Check if the provided argument is a valid number
+        if ! [[ $2 =~ ^[0-9]+$ ]]; then
+            echo "Usage: open \"<file>\" [<line_number>]"
+            echo "Error: <line_number> must be a number"
+            return  # Exit if the line number is not valid
+        fi
+        local max_line=$(awk 'END {print NR}' $1)
+        if [ $2 -gt $max_line ]; then
+            echo "Warning: <line_number> ($2) is greater than the number of lines in the file ($max_line)"
+            echo "Warning: Setting <line_number> to $max_line"
+            local line_number=$(jq -n "$max_line")  # Set line number to max if greater than max
+        elif [ $2 -lt 1 ]; then
+            echo "Warning: <line_number> ($2) is less than 1"
+            echo "Warning: Setting <line_number> to 1"
+            local line_number=$(jq -n "1")  # Set line number to 1 if less than 1
+        else
+            local OFFSET=$(jq -n "$WINDOW/6" | jq 'floor')
+            local line_number=$(jq -n "[$2 + $WINDOW/2 - $OFFSET, 1] | max | floor")
+        fi
+    else
+        local line_number=$(jq -n "$WINDOW/2")  # Set default line number if not provided
+    fi
+
+    if [ -f "$1" ]; then
+        export CURRENT_FILE=$(realpath "$1")
+        export CURRENT_LINE=$line_number
+        _constrain_line
+        _print
+    elif [ -d "$1" ]; then
+        echo "Error: $1 is a directory. You can only open files. Use cd or ls to navigate directories."
+    else
+        echo "File $1 not found"
+    fi
+}
+
+open "$@"

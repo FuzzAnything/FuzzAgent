@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+import os
+import copy
+from typing import List
+import subprocess
+import shutil
+import argparse, sys
+import time
+from project_utils import SANCOV_CFLAGS, get_fuzzing_engine, FuzzingEngine, FuzzerExecutionInfo, FuzzerExecutionState, ProjectUtils, CompileKind, FUZZER_CFLAGS, COVERAGE_CFLAGS, print_debug
+
+
+def necessary_print(message: str, CompileKind: CompileKind):
+    if CompileKind == CompileKind.Fuzzer:
+        print(f"{message}")
+    else:
+        print_debug(f"{message}")
+
+def check_harness_and_output_dir(harness_id: int, force_overwrite: bool = False):
+    harness_path = ProjectUtils.get_harness_path_by_id(harness_id)
+    if not os.path.exists(harness_path):
+        raise Exception(
+            f"[!] Error: Get hanress failed! The harness {harness_path} does not exist. Please provide with a valid harness id."
+        )
+
+    fuzzer_dir = ProjectUtils.get_fuzzer_dir_by_id(harness_id, check_exist=False)
+    if not os.path.exists(fuzzer_dir):
+        os.makedirs(fuzzer_dir, exist_ok=True)
+        return
+
+    for entry in os.listdir(fuzzer_dir):
+        entry_path = os.path.join(fuzzer_dir, entry)
+        if os.path.isdir(entry_path) and entry not in ["fuzzing_corpus"]:
+            shutil.rmtree(entry_path, ignore_errors=True)
+        elif os.path.isfile(entry_path):
+            os.remove(entry_path)
+    os.makedirs(fuzzer_dir, exist_ok=True)
+
+    # Should not compile the fuzzer which was already reached coverage plateau. Compile a fuzzer reached coverage plateau could eliminate the existing coverage and cause confusion. Similarly for library bug.
+    fuzzer_profile = ProjectUtils.get_fuzzer_profile()
+    fuzzer_info = fuzzer_profile.fuzzers.get(harness_id)
+    if not force_overwrite and fuzzer_info and fuzzer_info.state == FuzzerExecutionState.PLATEAU:
+        raise Exception(f"[!] Warning: Skipping compilation for harness {harness_id}. The fuzzer {harness_id} for it already reached coverage plateau. You should create a new harness instance if you want to further fuzz it.")
+    if not force_overwrite and fuzzer_info and fuzzer_info.state == FuzzerExecutionState.LIBRARY_BUG:
+        raise Exception(f"[!] Warning: Skipping compilation for harness {harness_id}. The fuzzer {harness_id} for it already found library bug. We should archive it. You should create a new harness instance if you want to further fuzz it.")
+
+def list_shared_libraries(lib_dir: str) -> List[str]:
+    shared_libraries = []
+    for file in os.listdir(lib_dir):
+        if file.endswith(".so"):
+            so_file = os.path.join(lib_dir, file)
+            shared_libraries.append(so_file)
+    return shared_libraries
+
+
+def list_archive_libraries(lib_dir: str) -> List[str]:
+    archive_libraries = []
+    for file in os.listdir(lib_dir):
+        if file.endswith(".a"):
+            lib_file = os.path.join(lib_dir, file)
+            archive_libraries.append(lib_file)
+    return archive_libraries
+
+def get_fuzz_wraper_path():
+    cache_output_dir = ProjectUtils.get_project_cache_dir()
+    fuzz_wrapper = os.path.join(cache_output_dir, "fuzz_wrapper.cpp")
+    if not os.path.exists(fuzz_wrapper):
+        raise Exception(f"[!] Error: Fuzz wrapper file {fuzz_wrapper} does not exist!")
+    return fuzz_wrapper
+
+def get_successful_compilation_flags(harness_id: int) -> str:
+    if harness_id <= 0:
+        return ""
+    cache_output_dir = ProjectUtils.get_cache_fuzzer_dir(0)
+    extra_flags_file = os.path.join(cache_output_dir, "extra_flags.txt")
+    if not os.path.exists(extra_flags_file):
+        return ""
+    with open(extra_flags_file, "r", encoding="utf-8") as f:
+        extra_flags = f.read().strip()
+    return extra_flags
+
+def compile_harness(
+    harness_id: int, compile_kind: CompileKind, output_dir:str, extra_flags: str = ""
+): 
+    start_time = time.time()
+    harness_path = ProjectUtils.get_harness_path_by_id(harness_id)
+    compile_name = compile_kind.value
+    necessary_print(f"[~] Compile {harness_path} to fuzzer with {compile_name} instrumentation.", compile_kind)
+    if not os.path.exists(harness_path):
+        raise Exception(f"[!] Error: Harness {harness_path} does not exist!")
+
+    fuzzer_path = ProjectUtils.get_fuzzer_output_path(output_dir, compile_kind)
+    lib_dir = os.path.join(ProjectUtils.get_build_work_dir(compile_kind), "lib")
+    compiler = "afl-clang-lto++" if (compile_kind == CompileKind.Fuzzer or compile_kind == CompileKind.CMPLOG) and get_fuzzing_engine() == FuzzingEngine.AFLpp else "clang++"
+    compile_cmd = [compiler]
+    if compile_kind != CompileKind.SanCov:
+        compile_cmd.append("-fsanitize=fuzzer")
+
+    compile_cmd.extend([
+        f"-I{ProjectUtils.get_project_header_include_dir()}",
+        f"-I{ProjectUtils.get_project_3rdparty_include_dir(ProjectUtils.get_build_work_dir(compile_kind))}",
+        harness_path,
+        "-o",
+        fuzzer_path
+    ])
+
+    envs = os.environ.copy()
+
+    if compile_kind == CompileKind.Fuzzer:
+        compile_cmd.extend(FUZZER_CFLAGS.strip().replace("-fsanitize-coverage=trace-pc-guard", "").split())
+        if get_fuzzing_engine() == FuzzingEngine.AFLpp:
+            envs["AFL_USE_ASAN"] = "1"
+            envs["AFL_USE_UBSAN"] = "1"
+    elif compile_kind == CompileKind.CMPLOG:
+        compile_cmd.extend(FUZZER_CFLAGS.strip().replace("-fsanitize-coverage=trace-pc-guard", "").split())
+        if get_fuzzing_engine() == FuzzingEngine.AFLpp:
+            envs["AFL_USE_ASAN"] = "1"
+            envs["AFL_USE_UBSAN"] = "1"
+            envs["AFL_LLVM_CMPLOG"] = "1"
+    elif compile_kind == CompileKind.SanCov:
+        compile_cmd.append(get_fuzz_wraper_path())
+        compile_cmd.extend(SANCOV_CFLAGS.strip().split())
+    elif compile_kind == CompileKind.Coverage:
+        compile_cmd.extend(COVERAGE_CFLAGS.strip().split())
+
+    static_lib_files = list_archive_libraries(lib_dir)
+    compile_cmd.append("-Wl,--start-group")
+    short_cmd = copy.deepcopy(compile_cmd)
+    for lib in static_lib_files:
+        compile_cmd.append(lib)
+    
+    
+    third_party_libs = ProjectUtils.get_project_3rdparty_libs_from_dir(ProjectUtils.get_build_work_dir(compile_kind))
+    for third_party_lib in third_party_libs:
+        compile_cmd.append(third_party_lib)
+    
+    # Add zlib and math library linking flags for libpng after static libraries
+    if extra_flags.strip():
+        compile_cmd.extend(extra_flags.strip().split())
+    
+    if len(static_lib_files) + len(third_party_libs) > 3:
+        short_cmd.append(f"{lib_dir}/*.a")
+        thirdparty_lib_dir = os.path.join(ProjectUtils.get_build_work_dir(compile_kind), "3rdparty", "lib")
+        short_cmd.append(f"{thirdparty_lib_dir}/*.a")
+    short_cmd.append("-Wl,--end-group")
+    compile_cmd.append("-Wl,--end-group")
+
+    necessary_print(" ".join(short_cmd), compile_kind)
+
+    # compile harness
+    output = subprocess.run(compile_cmd, env=envs, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if output.returncode != 0:
+        err = output.stderr.decode("utf-8", errors="ignore")
+        if "file not found" in err:
+            err += f"\nSuggestion: Please check the header path in harness and make sure it exists under the actual include directory : {ProjectUtils.get_project_header_include_dir()}"
+        succ_flags = get_successful_compilation_flags(harness_id)
+        if succ_flags:
+            err += f"\nSuggestion: Detected undefined reference error. Please check whether the necessary libraries are linked and the extra compilation flags are used. The successfully compiled harness uses the extra flags: {succ_flags}"
+        err += f"\nReminder: Please check your harness and provide the correct extra compilation flags. If this is an error related to incorrect library building, please **Exit** and seek for help from the ManagerAgent."
+        err = ProjectUtils.truncate_error_message(err)
+        raise Exception(
+            f"[!] Error: Failed to compile harness {harness_path}!\n {err}\n"
+        )
+
+    if not os.path.exists(fuzzer_path):
+        raise Exception(f"[!] Error: Failed to compile harness {harness_path}!")
+    end_time = time.time()
+    necessary_print(f"[+] Compiled {compile_kind} fuzzer location: {fuzzer_path}, time taken: {end_time - start_time:.2f} seconds", compile_kind)
+
+
+def log_extra_flags(harness_id: int, extra_flags: str):
+    cache_output_dir = ProjectUtils.get_cache_fuzzer_dir(harness_id)
+    extra_flags_file = os.path.join(cache_output_dir, "extra_flags.txt")
+    with open(extra_flags_file, "w", encoding="utf-8") as f:
+        f.write(extra_flags)
+
+def check_and_compile_harness(harness_id: int, extra_flags: str, force_overwrite: bool):
+    check_harness_and_output_dir(harness_id, force_overwrite)
+
+    output_dir = ProjectUtils.get_fuzzer_dir_by_id(harness_id)
+    cache_output_dir = ProjectUtils.get_cache_fuzzer_dir(harness_id)
+    compile_harness(
+        harness_id, compile_kind=CompileKind.Fuzzer, output_dir=output_dir, extra_flags=extra_flags
+    )
+    if get_fuzzing_engine() == FuzzingEngine.AFLpp:
+        compile_harness(
+            harness_id, compile_kind=CompileKind.CMPLOG, output_dir=cache_output_dir, extra_flags=extra_flags
+        )
+    compile_harness(
+        harness_id, compile_kind=CompileKind.Coverage, output_dir=cache_output_dir, extra_flags=extra_flags
+    )
+    #cache_output_dir = ProjectUtils.get_cache_fuzzer_dir(harness_id)
+    #compile_harness(
+    #    harness_id, compile_kind=CompileKind.Basic, output_dir=cache_output_dir, extra_flags=extra_flags
+    #)
+    compile_harness(
+        harness_id, compile_kind=CompileKind.SanCov, output_dir=cache_output_dir, extra_flags=extra_flags
+    )
+    reset_fuzzer_execution_state(harness_id)
+    reset_fuzzer_coverage_state(harness_id)
+    log_extra_flags(harness_id, extra_flags)
+    
+def reset_fuzzer_coverage_state(harness_id: int):
+    coverage_dir = ProjectUtils.get_fuzzer_coverage_dir(harness_id)
+    if os.path.exists(coverage_dir):
+        shutil.rmtree(coverage_dir)
+
+def reset_fuzzer_execution_state(harness_id: int):
+    fuzz_profile = ProjectUtils.get_fuzzer_profile()
+    fuzzer_info = fuzz_profile.fuzzers.get(harness_id)
+    if fuzzer_info is None:
+        new_fuzzer_info = FuzzerExecutionInfo(
+            fuzzer_id=harness_id,
+            state=FuzzerExecutionState.NOT_EXECUTED,
+            execution_time=0,
+            coverage=0,
+            crashes=0,
+            finish_time=""
+        )
+        fuzz_profile.fuzzers[harness_id] = new_fuzzer_info
+    else:
+        if fuzzer_info.state == FuzzerExecutionState.CRASHED or fuzzer_info.state == FuzzerExecutionState.HARNESS_BUG:
+            fuzzer_info.state = FuzzerExecutionState.FIXED
+        else:
+            fuzzer_info.state = FuzzerExecutionState.NOT_EXECUTED
+        fuzzer_info.finish_time = ""
+    ProjectUtils.save_fuzzer_profile(fuzz_profile)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        prog="compile_and_check_harness",
+        description="Compile the harness and check whether it contains compilation errors."
+    )
+    parser.add_argument(
+        "harness_id",
+        type=int,
+        help="The harness instance ID to compile. E.g., 000, 001, etc."
+    )
+
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Whether to force overwrite the existing fuzzer and coverage files. By default, the script will not overwrite the existing fuzzer if it detects the fuzzer has already reached coverage plateau or found library bug, to avoid confusion. Use this flag if you want to force overwrite the existing fuzzer and coverage files. Please be cautious when using this flag, as it may cause data missing if the existing fuzzer has already reached coverage plateau or found library bug."
+    )
+
+    parser.add_argument(
+        "extra_flags",
+        type=str,
+        nargs=argparse.REMAINDER,
+        help="Extra flags used to compile the harness."
+    )
+
+
+    args = parser.parse_args()
+    harness_id = args.harness_id
+    # Join all linking options into a single string
+    extra_flags = " ".join(args.extra_flags)
+    force_overwrite = args.force
+    check_and_compile_harness(harness_id, extra_flags, force_overwrite)

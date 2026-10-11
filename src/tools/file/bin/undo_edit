@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# Source the defaults to get helper functions
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/defaults.sh"
+
+# @yaml
+# signature: undo_edit
+# docstring: undoes the last edit operation by restoring the file from the backup created in /tmp directory. This will revert the file to its state before the most recent edit command.
+# arguments: none
+undo_edit() {
+    # Check if backup environment file exists
+    if [ ! -f "/tmp/last_edit_backup.env" ]; then
+        echo "Error: No recent edit backup found. Cannot undo."
+        return 1
+    fi
+    
+    # Source the backup file path
+    source "/tmp/last_edit_backup.env"
+    
+    # Check if backup file exists
+    if [ ! -f "$EDIT_BACKUP_FILE" ]; then
+        echo "Error: Backup file '$EDIT_BACKUP_FILE' not found. Cannot undo."
+        return 1
+    fi
+    
+    # Get the original file path from the backup file name
+    local backup_basename=$(basename "$EDIT_BACKUP_FILE")
+    local original_filename=$(echo "$backup_basename" | sed 's/_backup_[0-9]*$//')
+    
+    # Check if we have a current file or need to find the original
+    local target_file
+    if [ -n "$CURRENT_FILE" ]; then
+        target_file="$CURRENT_FILE"
+    else
+        # Try to find the file in current directory
+        if [ -f "$original_filename" ]; then
+            target_file="$original_filename"
+        else
+            echo "Error: Cannot determine the target file to restore. Please use 'open' command first."
+            return 1
+        fi
+    fi
+    
+    # Confirm the operation
+    echo "About to restore '$target_file' from backup '$EDIT_BACKUP_FILE'"
+    echo "This will overwrite the current contents of the file."
+    
+    # Restore the file
+    if cp "$EDIT_BACKUP_FILE" "$target_file"; then
+        echo "Successfully restored '$target_file' from backup."
+        
+        # Update CURRENT_FILE if we restored a different file
+        if [ "$target_file" != "$CURRENT_FILE" ]; then
+            export CURRENT_FILE="$target_file"
+        fi
+        
+        # Display the restored file
+        if command -v _constrain_line >/dev/null && command -v _print >/dev/null; then
+            export CURRENT_LINE=1
+            _constrain_line
+            _print
+        else
+            echo "File restored. Content:"
+            head -20 "$target_file"
+        fi
+        
+        # Clean up the backup tracking
+        rm -f "/tmp/last_edit_backup.env"
+        rm -f "$EDIT_BACKUP_FILE"
+        
+    else
+        echo "Error: Failed to restore the file from backup."
+        return 1
+    fi
+}
+
+undo_edit "$@"

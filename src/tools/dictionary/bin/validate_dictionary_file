@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+import os
+import re
+import argparse
+import subprocess
+import sys
+import shutil
+import filecmp
+from project_utils import ProjectUtils, check_subprocess_output
+
+def no_traceback_hook(exc_type, exc_value, exc_traceback):
+    print(f"{exc_type.__name__}: {exc_value}")
+
+FUZZAGENT_DEBUG = os.getenv('FUZZAGENT_DEBUG')
+if not FUZZAGENT_DEBUG:
+    sys.excepthook = no_traceback_hook
+
+simple_libfuzzer = """
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+
+int LLVMFuzzerTestOneInput(const uint8_t *Data, size_t Size) {
+    return 0;
+}
+"""
+
+def validate_dictionary_file(file_path: str):
+    """
+    Validate the format of a dictionary file.
+    
+    Args:
+        file_path (str): Path to the dictionary file to validate
+        
+    Returns:
+        tuple: (bool, str) where the bool indicates success/failure,
+               and the str contains an error message if validation failed
+    """
+    # Check if path exists
+    if not os.path.exists(file_path):
+        raise Exception(f"[!] Error: File does not exist: {file_path}")
+    
+    # If it's a directory, it's valid (files inside don't need special formatting)
+    if os.path.isdir(file_path):
+        raise Exception(f"[!] Error: Directory format is not valid: {file_path}")
+    
+    # For files, we need to validate each line
+    with open(file_path, 'r', encoding='utf-8') as f:
+        line_number = 0
+        for line in f:
+            line_number += 1
+            line = line.strip()
+            
+            # Skip empty lines and comments
+            if not line or line.startswith('#'):
+                continue
+            
+            # Validate line format
+            if not re.fullmatch(
+                r'^(?:[a-zA-Z0-9_]+(?:@\d+)?\s*=\s*)?"(?:[^"\\]|\\.)*"(?:\s*#.*)?$', 
+                line
+            ):
+                raise Exception(f"[!] Error: Invalid format at line {line_number}:\n {line}")
+            
+            # If there's an @ in the name part, validate that
+            if '@' in line.split('=')[0]:
+                name_part = line.split('=')[0].strip()
+                if not re.fullmatch(r'[a-zA-Z0-9_]+@\d+', name_part.split('@')[0] + '@' + name_part.split('@')[1].split()[0]):
+                    raise Exception(f"[!] Error: Invalid level specification at line {line_number}:\n {line}")
+
+            # detect inline comments
+            if re.match(r'.*\s+#.*', line):
+                raise Exception(f"[!] Error: Inline comments are not allowed at line {line_number}:\n {line}")
+            
+            # Validate the quoted value
+            try:
+                # Try to extract the quoted value
+                match = re.search(r'"(.*?)"', line)
+                if match:
+                    quoted_value = match.group(1)
+                else:
+                    raise Exception(f"[!] Error: Missing or malformed quoted value at line {line_number}:\n {line}")
+                # Check for unescaped quotes or backslashes
+                if '"' in quoted_value:
+                    # Check if quote is properly escaped
+                    if re.search(r'[^\\]\"', quoted_value):
+                        raise Exception(f"[!] Error: Invalid escape sequence at line {line_number}:\n {line}")
+            except (AttributeError, IndexError):
+                raise Exception(f"[!] Error: Missing or malformed quoted value at line {line_number}:\n {line}")
+    
+    # validate simple libfuzzer
+    with open("/tmp/simple_libfuzzer.c", "w") as f:
+        f.write(simple_libfuzzer)
+    cmd = ["clang", "/tmp/simple_libfuzzer.c", "-fsanitize=fuzzer", "-g", "-o", "/tmp/simple_libfuzzer"]
+    output = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    check_subprocess_output(output)
+    cmd = ["/tmp/simple_libfuzzer", "-dict=" + file_path, "-runs=1"]
+    output = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    if output.returncode != 0:
+        raise Exception(f"[!] Error: dictionary validated failed!\n {output.stderr.decode('utf-8')}")
+    
+    # Copy the validated file to project's dictionary directory
+    dest_dir = ProjectUtils.get_project_dictionary_dir()
+    os.makedirs(dest_dir, exist_ok=True)
+    dest_path = os.path.join(dest_dir, os.path.basename(file_path))
+
+    try:
+        # If source and destination are the same physical file, or destination exists and contents are identical, skip copy
+        if (os.path.exists(dest_path) and os.path.samefile(file_path, dest_path)) or (os.path.exists(dest_path) and filecmp.cmp(file_path, dest_path, shallow=False)):
+            pass
+        else:
+            shutil.copy(file_path, dest_path)
+    except OSError as e:
+        raise Exception(f"[!] Error: Failed to copy validated file: {e}")
+    print(f"[+] Dictionary file is valid.")
+        
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser("validate_dictionary_file", "Validate whether the format of the dictionary file is legal.")
+    parser.add_argument("dictionary_file", type=str,  help="The path of dictionary file you want to validate.")
+    args = parser.parse_args()
+    validate_dictionary_file(args.dictionary_file)
+

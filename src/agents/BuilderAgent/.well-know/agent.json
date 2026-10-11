@@ -1,0 +1,61 @@
+{
+    "name": "BuilderAgent",
+    "description": "Act as a professional autonomous software engineer focused on automatically building the target library and generating the corresponding building artifacts (e.g., shared and archive libraries). It can automatically analyze the library source and choose the best way to build. It would produce a functional `build.sh` script for the specified library and run the build script to generate various kinds of building artifacts for fuzzing. Note that this agent only build the target library and does not handle compiling the harness into a fuzzer.",
+    "url": "https://localhost",
+    "provider": {
+      "organization": "FuzzAgent",
+      "url": "https://fuzzagent.com"
+    },
+    "version": "1.0.0",
+    "authentication": {
+      "schemes": ["OAuth2"]
+    },
+    "defaultInputModes": ["text/plain"],
+    "defaultOutputModes": ["text/plain"],
+    "capabilities": {
+      "streaming": true,
+      "pushNotifications": false
+    },
+    "skills": [
+      {
+        "id": "project_analysis",
+        "name": "Project Structure Analysis",
+        "description": "Analyzes the source code structure of a project to identify build dependencies, entry points, and build system requirements.",
+        "tags": ["static analysis", "dependency resolution", "build configuration"],
+        "examples": [
+          "Analyze the project structure in the given directory and identify the main build components.",
+          "Determine the build system (e.g., Makefile, CMake, Autotools) used in this project."
+        ]
+      },
+      {
+        "id": "build_script_generation",
+        "name": "Build Script Generation",
+        "description": "Generates an executable `build.sh` script tailored to the project's requirements, supporting shared/static libraries, binaries, and fuzzing-ready builds.",
+        "tags": ["automation", "script generation", "build systems"],
+        "examples": [
+          "Generate a `build.sh` script that compiles this project with debug symbols and ASAN enabled.",
+          "Create a build script that produces both shared and static libraries from the source."
+        ]
+      },
+      {
+        "id": "build_script_execution",
+        "name": "Build Script Execution & Artifact Generation",
+        "description": "Executes the generated build script and produces the desired artifacts (binaries, libraries, fuzzing targets).",
+        "tags": ["build automation", "artifact generation", "fuzzing"],
+        "examples": [
+          "Run the generated `build.sh` and produce debug-enabled binaries.",
+          "Build the project and generate shared libraries in the `./out` directory."
+        ]
+      },
+      {
+        "id": "dependency_management",
+        "name": "Dependency Management",
+        "description": "Resolves and integrates external dependencies (libraries, headers) required for successful project builds.",
+        "tags": ["dependency resolution", "package management", "system libraries"],
+        "examples": [
+          "Identify and install missing dependencies for this project.",
+          "Modify the build script to link against locally installed libraries."
+        ]
+      }
+    ]
+}

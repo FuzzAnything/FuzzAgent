@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+
+from github import Github, GithubException, Auth
+import argparse
+import sys
+import math
+from typing import List, Any
+import os
+
+# suggest to configure Token, otherwise anonymous access很容易触发API速率限制
+# g = Github("YOUR_GITHUB_TOKEN") 
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+if not GITHUB_TOKEN:
+    print("Error: GITHUB_TOKEN is not set. Please set it in the .env file.")
+    sys.exit(1)
+auth = Auth.Token(GITHUB_TOKEN)
+g = Github(auth=auth)
+repo = g.get_repo("google/oss-fuzz")
+PATH_ROOT = "projects/"
+PAGE_SIZE = 1500  # number of items per page
+
+class ContentAdapter:
+    """
+    Adapter pattern: wrap GitTreeElement into a ContentFile-like object
+    """
+    def __init__(self, element, base_path):
+        self.element = element
+        self.name = element.path
+        self.path = f"{base_path}/{element.path}".strip("/")
+        # Tree 'tree' -> 'dir', 'blob' -> 'file'
+        self.type = 'dir' if element.type == 'tree' else 'file'
+        self.size = None 
+        
+    @property
+    def decoded_content(self):
+        raise NotImplementedError("Tree adapter does not support direct content reading")
+
+def format_size(size: int) -> str:
+    """Format file size compactly"""
+    if size is None: return ""
+    size_float = float(size)
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_float < 1024.0:
+            # remove extra decimal points, save tokens (e.g., 100.0B -> 100B)
+            if size_float.is_integer():
+                return f"{int(size_float)}{unit}"
+            return f"{size_float:.1f}{unit}"
+        size_float /= 1024.0
+    return f"{size_float:.1f}TB"
+
+def display_directory(contents: List, path: str):
+
+    # 1. Sort: directories first, then files
+    dirs = [item for item in contents if item.type == 'dir']
+    files = [item for item in contents if item.type == 'file']
+    
+    dirs.sort(key=lambda x: x.name.lower())
+    files.sort(key=lambda x: x.name.lower())
+    
+    all_items = dirs + files
+    total_items = len(all_items)
+    
+
+    # 3. Output Metadata (Structured for Agent parsing)
+    print("---DIR_INFO---")
+    print(f"Path: {path}")
+    print(f"Total_Items: {total_items}")
+    print("---CONTENTS---")
+
+    # 4. Output Content (Compact format: [Type] Name Size)
+    for item in all_items:
+        if item.type == 'dir':
+            print(f"[D] {item.name}")
+        else:
+            # Only show size if available, no extra spaces
+            size_str = format_size(item.size)
+            size_info = f" ({size_str})" if size_str else ""
+            print(f"[F] {item.name}{size_info}")
+    print("---END_DIR_INFO---")
+    print("The above is the available entries. You can put the name of the entry to read the content.")
+
+def display_file(content, path: str):
+    """Show file information"""
+    # simple metadata header
+    print(f"---FILE_INFO---\nPath: {path}")
+    if hasattr(content, 'size') and content.size:
+        print(f"Size: {format_size(content.size)}")
+    print("---CONTENT---")
+    
+    try:
+        content_str = content.decoded_content.decode('utf-8')
+        print(content_str)
+    except Exception as e:
+        print(f"[Error decoding content: {e}]")
+        download_url = content.download_url
+        print(f"Non-raw content is not supported. Please download it by: {download_url}")
+
+def get_tree_sha_recursive(base_tree, path_parts):
+    """Recursively find the SHA of the target path"""
+    if not path_parts:
+        return base_tree.sha
+    
+    current_target = path_parts[0]
+    for element in base_tree.tree:
+        if element.path == current_target:
+            if len(path_parts) == 1:
+                return element.sha
+            else:
+                subtree = repo.get_git_tree(element.sha)
+                return get_tree_sha_recursive(subtree, path_parts[1:])
+    return None
+
+def get_large_directory(full_path: str):
+    """Use Git Tree API to handle large directories"""
+    default_branch = repo.default_branch
+    branch = repo.get_branch(default_branch)
+    commit_sha = branch.commit.sha
+    root_tree = repo.get_git_tree(commit_sha)
+    
+    target_sha = None
+    clean_path = full_path.strip("/")
+    
+    if not clean_path:
+        target_sha = root_tree.sha
+    else:
+        path_parts = clean_path.split("/")
+        target_sha = get_tree_sha_recursive(root_tree, path_parts)
+        
+    if not target_sha:
+        raise Exception(f"Path not found: {full_path}")
+        
+    tree = repo.get_git_tree(target_sha)
+    return [ContentAdapter(elem, clean_path) for elem in tree.tree]
+
+def get_contents(path: str):
+    """Get contents from the GitHub repository"""
+    if path == "list":
+        path = ""
+
+    try:
+        path = path.strip().strip('/').removeprefix('projects/')
+        full_path = PATH_ROOT + path if path else PATH_ROOT.rstrip('/')
+        
+        contents = None
+        try:
+            contents = repo.get_contents(full_path)
+            
+            # check if the contents is a large list
+            is_large_list = isinstance(contents, list) and len(contents) >= 1000
+            if is_large_list:
+                contents = get_large_directory(full_path)
+            
+        except GithubException as e:
+            if "too large" in str(e).lower() or (isinstance(contents, list) and len(contents) >= 1000):
+                contents = get_large_directory(full_path)
+            else:
+                raise e
+
+        if isinstance(contents, list):
+            display_directory(contents, full_path)
+        else:
+            display_file(contents, full_path)
+            
+    except Exception as e:
+        error_msg = str(e)
+        if "404" in error_msg or "Not Found" in error_msg:
+            print(f"Error: Path {full_path} does not exist in the web repository. Please check if the path exists in the web repository. If this is a relative path existed in the build.sh or Dockerfile, you should follow the instructions in them to get the file.")
+        else:
+            print(f"Error: {error_msg}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Fetch oss-fuzz file info (Agent Optimized)")
+    parser.add_argument(
+        "path", 
+        type=str,
+        help="Path relative to 'projects/'"
+    )
+    
+    args = parser.parse_args()
+    # handle the case when path is empty
+    target_path = args.path if args.path else ""
+    
+    get_contents(target_path)

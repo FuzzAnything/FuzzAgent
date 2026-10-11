@@ -1,0 +1,78 @@
+#!/usr/bin/env python
+
+from html_table_parser import HtmlTable
+import os
+import math
+from project_utils import ProjectUtils, FUZZAGENT_DEBUG
+from llvm_cov import LLVM_COV_DATA
+import argparse
+from show_code_coverage import CoverageUtils
+
+
+class FileCovReport:
+    
+    COVERAGE_PAGE_SIZE = 50
+
+    def __init__(self, coverage_dir: str):
+        self.coverage_dir = coverage_dir
+        self.llvm_cov_data = self.parse_llvm_cov_data()
+        self.coverage_data = self.calculate_file_coverage()
+
+
+    def parse_llvm_cov_data(self):
+        llvm_cov_data_file = os.path.join(self.coverage_dir, "llvm_cov.json")
+        llvm_cov_data = LLVM_COV_DATA(llvm_cov_data_file)
+        return llvm_cov_data
+
+
+    def calculate_file_coverage(self):
+        coverage_data = []
+        for file in self.llvm_cov_data.files:
+            file_name = file.filiename
+            function_cov = file.summary.functions.percent
+            region_cov = file.summary.regions.percent
+            line_cov = file.summary.lines.percent
+            branch_cov = file.summary.branches.percent
+            coverage_data.append( {
+                "file_name": file_name,
+                "region_cov": region_cov,
+                "line_cov": line_cov,
+                "function_cov": function_cov,
+                "branch_cov": branch_cov
+            })
+        coverage_data.sort(key=lambda x: x["branch_cov"], reverse=True)
+        return coverage_data
+
+    def display(self, page: int):
+        start = (page - 1) * self.COVERAGE_PAGE_SIZE
+        end = start + self.COVERAGE_PAGE_SIZE
+        header = "| File Name | Region Coverage | Line Coverage | Function Coverage | Branch Coverage |\n"
+        print(header)
+        for i in range(start, end):
+            if i >= len(self.coverage_data):
+                break
+            file_name = self.coverage_data[i]["file_name"]
+            region_cov = self.coverage_data[i]["region_cov"]
+            line_cov = self.coverage_data[i]["line_cov"]
+            function_cov = self.coverage_data[i]["function_cov"]
+            branch_cov = self.coverage_data[i]["branch_cov"]
+            print(f"| {file_name} | {region_cov:.2f}% | {line_cov:.2f}% | {function_cov:.2f}% | {branch_cov:.2f}% |")
+        current_page = page
+        total_pages = math.ceil(len(self.coverage_data) / self.COVERAGE_PAGE_SIZE)
+        print(f"Current page: {current_page}, Total pages: {total_pages}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("page", type=int, default=1, help="Page number to show coverage for")
+    parser.add_argument("--fuzzer_id", type=int, required=False, default=None, help="Fuzzer ID to show coverage for")
+    args = parser.parse_args()
+    fuzzer_id = args.fuzzer_id
+    if fuzzer_id is not None:
+        CoverageUtils.execute_coverage_collection_pipeline(fuzzer_id)
+        coverage_dir = ProjectUtils.get_fuzzer_coverage_dir(fuzzer_id)
+    else:
+        CoverageUtils.gather_whole_project_coverage_pipeline()
+        coverage_dir = ProjectUtils.get_project_coverage_dir()
+    file_cov_report = FileCovReport(coverage_dir)
+    file_cov_report.display(args.page)

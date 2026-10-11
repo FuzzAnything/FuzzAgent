@@ -1,0 +1,762 @@
+#!/usr/bin/env python3
+
+from codecs import ignore_errors
+from operator import truediv
+import os
+import signal
+import subprocess
+import argparse
+import sys
+from typing import List
+import shutil
+import time
+import datetime
+from project_utils import FuzzerExecutionState, ProjectUtils, FUZZAGENT_DEBUG, print_debug, check_subprocess_output, get_fuzzing_engine, FuzzingEngine
+import json
+import re
+import pydantic
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
+import psutil
+from pathlib import Path
+import hashlib
+
+INTERVAL = 60
+MAX_RUNNING_TIME = 3600
+
+COVERAGE_SATURATION_THRESHOLD = 0.0001
+COVERAGE_FT_SATURATION_THRESHOLD = 0.01
+
+#def no_traceback_hook(exc_type, exc_value, exc_traceback):
+ #   print(f"{exc_type.__name__}: {exc_value}")
+
+
+#sys.excepthook = no_traceback_hook
+SANCOV_FUZZER="fuzzer_sancov"
+CMPLOG_FUZZER="fuzzer_cmplog"
+
+
+class SANCOV(pydantic.BaseModel):
+    covered_points: list[str] = pydantic.Field(..., alias="covered-points")
+    #binary_hash: str = pydantic.Field(..., alias="binary-hash")
+    #point_symbol_info: PointSymbolInfo = pydantic.Field(..., alias="point-symbol-info")
+
+
+# https://clang.llvm.org/docs/SanitizerCoverage.html
+# Perform corpus minimization on the inputs in the input_dirs, and save the smallest subset of the inputs covering all features to the target_dir
+# Note that this function does not use the `-merge=1` option of libfuzzer to minimize the corpus, because it must process inputs sequentially, which is not efficient and would took huge time for complex libraries (e.g., video codecs).
+# The original implementation of corpus minimization of libfuzzer would become a bottleneck for FuzzAgent.
+# To accelerate this process, we execute fuzzer on the corpus and collect coverage parallelly, and then use the coverage information to minimize the corpus.
+def efficient_corpus_minimization(fuzzer_id: int, target_dir: str, input_dirs: list):
+    corpus_files = []
+    fuzzer_dir = ProjectUtils.get_cache_fuzzer_dir(fuzzer_id)
+    coverage_dir = os.path.join(fuzzer_dir, "sancov")
+    if os.path.exists(coverage_dir):
+        shutil.rmtree(coverage_dir)
+    os.makedirs(coverage_dir, exist_ok=True)
+
+    for d_entry in input_dirs:
+        for root, _, files in os.walk(d_entry):
+            for file in files:
+                file_path = os.path.join(root, file)
+                corpus_files.append(file_path)
+    
+    corpus_dict = {}
+    with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
+        futures = [executor.submit(collect_sancov_for_file, fuzzer_id, file_path, coverage_dir) for file_path in corpus_files]
+        for future in as_completed(futures):
+            try:
+                file_path, sancov_info = future.result()
+                if sancov_info is not None:
+                    corpus_dict[file_path] = sancov_info
+            except Exception as e:
+                print_debug(f"[!] ERROR: Failed to collect coverage for file {file_path}! {e}")
+                continue
+    if len(corpus_dict) == 0:
+        print(f"[!] WARNING: Cannot examine any library coverage information from the fuzzer! There are three reasons cause this error: 1. The harness of this fuzzer did not contain any library code. 2. No API has been exercised by the fuzzing inputs. 3. The fuzzer is not compiled by the `compile_and_check_harness` tool. Please **Exit** and report this issue to HarnessAgent to seek help.")
+        minimal_set = corpus_files
+    else:
+        minimal_set = select_corpus_by_examining_sancov(corpus_dict)
+    for file_path in minimal_set:
+        dst_path = os.path.join(target_dir, os.path.basename(file_path))
+        if os.path.exists(dst_path):
+            try:
+                os.chmod(dst_path, 0o666)
+                os.remove(dst_path)
+            except Exception:
+                pass
+        try:
+            shutil.copy(file_path, target_dir)
+            os.chmod(dst_path, 0o666)
+        except Exception as e:
+            print(f"[!] Warning: Failed to copy {file_path} to {target_dir}: {e}")
+    print(f"[+] Selected {len(minimal_set)} files from {len(corpus_dict)} files to minimize the corpus")
+    if os.path.exists(coverage_dir):
+        shutil.rmtree(coverage_dir)
+    
+
+def collect_sancov_for_file(fuzzer_id: int, file_path: str, coverage_dir: str) -> tuple[str, SANCOV | None]:
+    print_debug(f"[+] Starting to collect coverage for file {file_path}")
+    fuzzer_dir = ProjectUtils.get_cache_fuzzer_dir(fuzzer_id)
+    fuzzer_binary = os.path.join(fuzzer_dir, SANCOV_FUZZER)
+
+    cmd = [fuzzer_binary, file_path]
+    env = os.environ.copy()
+    env["ASAN_OPTIONS"] = f"coverage=1:coverage_dir={coverage_dir}"
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, env=env)
+    pid = process.pid
+    try:
+        stdout, stderr = process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        print_debug(f"[!] ERROR: Failed to collect coverage for file {file_path}! Timeout")
+        process.kill()
+        process.wait() # Reap the zombie
+        return file_path, None
+    ret_code = process.returncode
+    if ret_code != 0:
+        err_msg = stderr.decode("utf-8")
+        print_debug(f"[!] ERROR: Failed to collect coverage for file {file_path}! {err_msg}")
+    
+    # We do not need process.kill() here since process.communicate() waits for it to terminate
+    # process.kill()
+
+    print_debug(f"[+] Collected coverage for file {file_path} with pid {pid}: {stdout.decode('utf-8')}")
+    sancov_name = f"fuzzer_sancov.{pid}.sancov"
+    sancov_file = os.path.join(coverage_dir, sancov_name)
+    if not os.path.exists(sancov_file):
+        print_debug(f"[!] WARNING: the sancov file {sancov_file} didn't exist! File path: {file_path}")
+        return file_path, None
+    return file_path, symbolize_sancov_file(fuzzer_id, sancov_file)
+    
+
+def symbolize_sancov_file(fuzzer_id: int, sancov_file: str) -> SANCOV:
+    fuzzer_dir = ProjectUtils.get_cache_fuzzer_dir(fuzzer_id)
+    fuzzer_binary = os.path.join(fuzzer_dir, SANCOV_FUZZER)
+    cmd = ["sancov", "-symbolize", fuzzer_binary, sancov_file]
+    output = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    if output.returncode != 0:
+        err_msg = output.stderr.decode("utf-8")
+        print_debug(f"[!] ERROR: Failed to symbolize sancov file {sancov_file}! {err_msg}")
+    sancov_info = SANCOV.model_validate_json(output.stdout.decode("utf-8"))
+    print_debug(f"[+] Symbolized sancov file {sancov_file} with: {len(sancov_info.covered_points)} covered points")
+    return sancov_info
+
+
+def select_corpus_by_examining_sancov(corpus_dict: dict[str, SANCOV]) -> list[str]:
+    minimal_set = []
+    feature_set = set()
+    for file_path, sancov_info in corpus_dict.items():
+        covered_points = set(sancov_info.covered_points)
+        difference = covered_points - feature_set
+        print_debug(f"[+] Examined file {file_path}, covered points: {len(covered_points)}, difference: {len(difference)}, feature_set: {len(feature_set)}")
+        if len(difference) == 0:
+            continue
+        feature_set = feature_set | difference
+        minimal_set.append(file_path)
+    return minimal_set
+
+import os
+import random
+
+def avoid_too_huge_initial_seeds(seed_dir: str, fuzzer_id: int, max_count: int = 1000):
+    if fuzzer_id != 0:
+        return
+    if not os.path.exists(seed_dir):
+        return
+
+    hash_named_files = []
+    non_hash_named_files = []
+
+    with os.scandir(seed_dir) as it:
+        for entry in it:
+            if not entry.is_file():
+                continue
+            # Most historical/artifact seeds are named by 40-hex hashes.
+            if re.fullmatch(r"[0-9a-fA-F]{40}", entry.name):
+                hash_named_files.append(entry.path)
+            else:
+                non_hash_named_files.append(entry.path)
+
+    total_count = len(hash_named_files) + len(non_hash_named_files)
+
+    if total_count <= max_count:
+        return
+
+    random.shuffle(non_hash_named_files)
+    random.shuffle(hash_named_files)
+
+    keep_files = []
+    if len(non_hash_named_files) >= max_count:
+        keep_files.extend(non_hash_named_files[:max_count])
+    else:
+        keep_files.extend(non_hash_named_files)
+        remain = max_count - len(keep_files)
+        keep_files.extend(hash_named_files[:remain])
+
+    keep_set = set(keep_files)
+    delete_files = [
+        file_path
+        for file_path in non_hash_named_files + hash_named_files
+        if file_path not in keep_set
+    ]
+
+    print(
+        f"[!] Corpus too large ({total_count}). Keep {len(keep_files)} files "
+        f"(non-hash first), remove {len(delete_files)} files."
+    )
+
+    for file_path in delete_files:
+        try:
+            os.remove(file_path)
+        except Exception:
+            pass
+
+def minimize_huge_initial_seeds(seed_dir: str, fuzzer_id: int):
+    seed_number = len(os.listdir(seed_dir)) if os.path.exists(seed_dir) else 0
+    if seed_number <= 500:
+        return
+    succ_fuzzer_id = None
+    for id in range(fuzzer_id):
+        fuzz_profile = ProjectUtils.get_fuzzer_profile()
+        fuzzer_info = fuzz_profile.fuzzers.get(id, None)
+        if fuzzer_info is not None and fuzzer_info.state == FuzzerExecutionState.PLATEAU:
+            succ_fuzzer_id = id
+    if succ_fuzzer_id is None:
+        return
+    
+    temp_dir = os.path.join("/tmp", "fuzz_seed_temp")
+    if os.path.exists(temp_dir):
+        shutil.rmtree(temp_dir)
+    os.makedirs(temp_dir, exist_ok=True)
+    efficient_corpus_minimization(succ_fuzzer_id, temp_dir, [seed_dir])
+    shutil.rmtree(seed_dir, ignore_errors=True)
+    shutil.move(temp_dir, seed_dir)
+
+
+def initialize_fuzzing_corpus(fuzzer_id: int):
+    fuzzer_corpus_dir = ProjectUtils.get_fuzzer_fuzzing_corpus_dir(fuzzer_id)
+    os.makedirs(fuzzer_corpus_dir, exist_ok=True)
+
+    initial_seed_dir = ProjectUtils.get_project_seed_dir()
+    avoid_too_huge_initial_seeds(initial_seed_dir, fuzzer_id)
+    minimize_huge_initial_seeds(initial_seed_dir, fuzzer_id)
+
+    # copy seed corpus to fuzzing corpus
+    input_dirs = [initial_seed_dir]
+    cache_seeds_dir = ProjectUtils.get_project_cache_seeds_dir()
+    for entry in os.listdir(cache_seeds_dir):
+        entry_path = os.path.join(cache_seeds_dir, entry)
+        input_dirs.append(entry_path)
+    efficient_corpus_minimization(fuzzer_id, fuzzer_corpus_dir, input_dirs)
+
+
+def list_all_fuzzer_corpus_dirs() -> List[str]:
+    fuzzer_dirs = os.listdir(ProjectUtils.get_project_fuzzers_dir())
+    fuzzer_corpus_dirs = []
+    for fuzzer_dir in fuzzer_dirs:
+        fuzzer_dir = os.path.join(ProjectUtils.get_project_fuzzers_dir(), fuzzer_dir)
+        fuzzer_id = ProjectUtils.get_fuzzer_id_from_path(fuzzer_dir)
+        fuzzer_corpus_dir = ProjectUtils.get_fuzzer_fuzzing_corpus_dir(fuzzer_id)
+        if os.path.exists(fuzzer_corpus_dir) and os.listdir(fuzzer_corpus_dir):
+            fuzzer_corpus_dirs.append(fuzzer_corpus_dir)
+    return fuzzer_corpus_dirs
+
+def merge_fuzzing_corpus(fuzzer_id: int):
+    all_fuzzer_corpus_dirs = list_all_fuzzer_corpus_dirs()
+    fuzzer_binary = ProjectUtils.get_fuzzer_binary_by_id(fuzzer_id)
+    cmd = [fuzzer_binary, "-merge=1", ProjectUtils.get_fuzzer_fuzzing_corpus_dir(fuzzer_id)]
+    for fuzzer_corpus_dir in all_fuzzer_corpus_dirs:
+        cmd.append(fuzzer_corpus_dir)
+    output = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    check_subprocess_output(output)
+
+
+def parse_afl_dynamic_features_from_bitmap(bitmap_path: str) -> int:
+    """
+    Parse AFL++'s fuzz_bitmap to calculate fine-grained dynamic features.
+    Each bit represents a probe in an independent frequency bucket.
+    The file's initial state is all 1s (0xFF), and when a bucket is triggered, its corresponding feature bit becomes 0.
+    Therefore, the total number of features = the number of all 0 bits in the bitmap.
+    """
+    if not os.path.exists(bitmap_path):
+        return 0
+        
+    with open(bitmap_path, "rb") as f:
+        data = f.read()
+        
+    total_bytes = len(data)
+    if total_bytes == 0:
+        return 0
+        
+    total_bits = total_bytes * 8
+    
+    # Convert to a big integer and use the underlying C mechanism to quickly count the number of '1's 
+    total_ones = int.from_bytes(data, byteorder='little').bit_count()
+    
+    # The number of bits set to 0 is the fine-grained feature count we want
+    dynamic_features = total_bits - total_ones
+    
+    return dynamic_features
+
+def parse_cov_detail_from_afl_log(output_dir: str):
+    fuzzer_stats_file = os.path.join(output_dir, "default", "fuzzer_stats")
+    if not os.path.exists(fuzzer_stats_file):
+        return None
+    bitmap_path = os.path.join(output_dir, "default", "fuzz_bitmap")
+    if not os.path.exists(bitmap_path):
+        return None
+    stats = {}
+    with open(fuzzer_stats_file, "r") as f:
+        lines = f.readlines()
+        for line in lines:
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            stats[key.strip()] = value.strip()
+    execs = int(stats["execs_done"])
+    exec_sec = float(stats["execs_per_sec"])
+    map_size = float(stats["bitmap_cvg"].strip("%"))
+    edges = int(stats["edges_found"])
+    crashes = int(stats["saved_crashes"])
+    features = parse_afl_dynamic_features_from_bitmap(bitmap_path)
+    return execs, map_size, edges, exec_sec, crashes, features
+
+
+
+def parse_san_cov_from_libfuzzer_log(fuzz_log: str) -> tuple[int, int, int]:
+    pattern = r"#(\d+).+cov: (\d+).+ft: (\d+)"
+    with open(fuzz_log, "r", encoding='utf-8', errors='ignore') as f:
+        f.seek(0, 1)
+        lines = f.readlines()
+        lines.reverse()
+        for line in lines:
+            match = re.search(pattern, line)
+            if match is not None:
+                epoch = int(match.group(1))
+                coverage = int(match.group(2))
+                ft = int(match.group(3))
+                return epoch, coverage, ft
+    return 0, 0, 0
+
+# Slow-units are not crashes. We need to clean them to avoid confusion.
+def clean_slow_units(fuzzer_id: int):
+    crash_dir = ProjectUtils.get_fuzzer_crash_dir(fuzzer_id)
+    for file in os.listdir(crash_dir):
+        if file.startswith("slow-unit"):
+            path = os.path.join(crash_dir, file)
+            shutil.rmtree(path, ignore_errors=True)
+
+def get_cache_fuzzer_queue_dirs(fuzzer_id: int) -> list[str]:
+    fuzzer_dir = ProjectUtils.get_cache_fuzzer_dir(fuzzer_id)
+    output_dir = os.path.join(fuzzer_dir, "output")
+    queue_dirs = []
+    for entry in os.listdir(output_dir):
+        instance_dir = os.path.join(output_dir, entry)
+        queue_dir = os.path.join(instance_dir, "queue")
+        if os.path.exists(queue_dir):
+            queue_dirs.append(queue_dir)
+    return queue_dirs
+
+def copy_afl_crashes_to_crash_dir(fuzzer_id: int):
+    if get_fuzzing_engine() != FuzzingEngine.AFLpp:
+        return
+    crash_dir = ProjectUtils.get_fuzzer_crash_dir(fuzzer_id)
+    output_dir = get_cache_fuzzer_output_dir(fuzzer_id)
+    afl_output_dirs = []
+    for entry in os.listdir(output_dir):
+        instance_dir = os.path.join(output_dir, entry)
+        if os.path.isdir(instance_dir):
+            afl_output_dirs.append(instance_dir)
+    if len(afl_output_dirs) == 0:
+        return
+    afl_crash_dirs = []
+    for instance_dir in afl_output_dirs:
+        afl_crash_dir = os.path.join(instance_dir, "crashes")
+        if os.path.exists(afl_crash_dir):
+            afl_crash_dirs.append(afl_crash_dir)
+    if len(afl_crash_dirs) == 0:
+        return
+
+    crash_files = []
+    for afl_crash_dir in afl_crash_dirs:
+        for name in sorted(os.listdir(afl_crash_dir)):
+            if name.startswith("."):
+                continue
+            if name.lower().startswith("readme"):
+                continue
+            path = os.path.join(afl_crash_dir, name)
+            if os.path.isfile(path):
+                crash_files.append(path)
+
+    if not crash_files:
+        return
+    os.makedirs(crash_dir, exist_ok=True)
+
+    src_crash = crash_files[0]
+    with open(src_crash, "rb") as f:
+        md5sum = hashlib.md5(f.read()).hexdigest()
+
+    dst_crash = os.path.join(crash_dir, f"crash-{md5sum}")
+    if os.path.exists(dst_crash):
+        return
+
+    shutil.copy2(src_crash, dst_crash)
+    print_debug(f"[+] Copied AFL crash {src_crash} to {dst_crash}")
+
+
+
+
+def execution_until_coverage_saturation(proc: subprocess.Popen, fuzzer_id: int, fuzz_log: str, fork: bool) -> tuple[bool, bool]: # return: is_plateau, need_fork
+    print(f"[+] Starting fuzzer monitoring with MAX_RUNNING_TIME={MAX_RUNNING_TIME}s, INTERVAL={INTERVAL}s")
+    fuzz_profile = ProjectUtils.get_fuzzer_profile()
+    fuzzer_info = fuzz_profile.fuzzers.get(fuzzer_id, None)
+    if fuzzer_info is None:
+        print(f"[!] ERROR: The fuzzer {ProjectUtils.get_fuzzer_str_by_id(fuzzer_id)} was not found in the fuzzer profile! Please **Exit** and report this issue to seek help.")
+        exit(-1)
+
+    prev_epoch = 0
+    prev_cov = 0
+    prev_ft = 0
+    ft = 0
+    elapsed_time = 0
+    while True:
+        sleep_seconds = 0
+        # periodically check the fuzzing execution status
+        while True:
+            time.sleep(10)
+            sleep_seconds += 10
+            elapsed_time += 10
+            if proc.poll() is not None:
+                print(f"[-] ERROR: The fuzzing process exited! Please check the log file and report the issue to CrashAnalyzer.")
+                fuzzer_info.execution_time = elapsed_time
+                fuzzer_info.state = FuzzerExecutionState.CRASHED
+                fuzzer_info.finish_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+                ProjectUtils.save_fuzzer_profile(fuzz_profile)
+                clean_slow_units(fuzzer_id)
+                copy_afl_crashes_to_crash_dir(fuzzer_id)
+                return False, False
+            if get_fuzzing_engine() == FuzzingEngine.AFLpp and sleep_seconds >= INTERVAL * 3:  # AFLpp only report edge level coverage, which is less fine-grained than the coverage of LibFuzzer. So we use a longer sleep interval to monitor its execution.
+                break
+
+            if get_fuzzing_engine() == FuzzingEngine.LibFuzzer and sleep_seconds >= INTERVAL:
+                break
+
+        if elapsed_time >= MAX_RUNNING_TIME:
+            print(f"[+] Maximum running time ({MAX_RUNNING_TIME}s) reached after {elapsed_time:.2f}s. Exit.")
+            break
+        
+        if get_fuzzing_engine() == FuzzingEngine.AFLpp:
+            output_dir = get_cache_fuzzer_output_dir(fuzzer_id)
+            detail = parse_cov_detail_from_afl_log(output_dir)
+            if detail is None:
+                if not fork:
+                    print(f"[!] WARNING: Cannot parse fuzzing coverage information from AFL log! The fuzzing execution might be too slow or the fuzzing process is not running properly. Elapsed: {elapsed_time:.2f}s. Switch to fork mode...")
+                    return False, True
+                else:
+                    if elapsed_time > 10 * 60:
+                        print(f"[!] WARNING: Cannot parse fuzzing coverage information from AFL log after 10 minutes! The fuzzing execution might be too slow or the fuzzing process is not running properly. Elapsed: {elapsed_time:.2f}s. Exit.")
+                        break
+                    print(f"[!] WARNING: Cannot parse fuzzing coverage information from AFL log! The fuzzing execution might be too slow or the fuzzing process is not running properly. Elapsed: {elapsed_time:.2f}s. Keep monitoring...")
+                    continue
+            epoch, _, edges, exec_sec, _, features = detail
+            cov_name = "edges"
+            ft_name = "features"
+            cov = edges
+            ft = features
+        else:
+            epoch, san_cov, ft = parse_san_cov_from_libfuzzer_log(fuzz_log)
+            cov_name = "san_cov"
+            ft_name = "ft"
+            cov = san_cov
+        if ft == 0: # too slow
+            if not fork:
+                # For some libraries (e.g., libvpx and ffmpeg), the fuzzing execution could be hanged by some large corpus files for a long time (e.g., 1 min for an input).
+                # The fuzzing mechanism of Libfuzzer requires to execute every seed at least once.
+                # So, at such cases, we will finailly struck at the first execution and cannot get the code coverge.
+                # We use the -fork model in LibFuzzer, to split these inputs to other cores. So the fuzzing would not be strucked.
+                print(f"[!] WARNING: Epoch: {epoch}, elapsed: {elapsed_time:.2f}s, prev_{cov_name}: {prev_cov}, curr_{cov_name}: {cov}, prev_{ft_name}: {prev_ft}, curr_{ft_name}: {ft}. The fuzzing execution is slow. Switch to fork mode...")
+                return False, True
+            else:
+                if elapsed_time > 10 * 60:
+                    print(f"[!] WARNING: Epoch: {epoch}, elapsed: {elapsed_time:.2f}s, prev_{cov_name}: {prev_cov}, curr_{cov_name}: {cov}, prev_{ft_name}: {prev_ft}, curr_{ft_name}: {ft}. No coverage collected after 10 minutes. Exit.")
+                    break
+                print(f"[!] WARNING: Epoch: {epoch}, elapsed: {elapsed_time:.2f}s, prev_{cov_name}: {prev_cov}, curr_{cov_name}: {cov}, prev_{ft_name}: {prev_ft}, curr_{ft_name}: {ft}. The fuzzing execution is slow. Keep monitoring..")
+                continue
+        if epoch == prev_epoch:
+            print(f"[!] WARNING: Epoch: {epoch}, elapsed: {elapsed_time:.2f}s, prev_{cov_name}: {prev_cov}, curr_{cov_name}: {cov}, prev_{ft_name}: {prev_ft}, curr_{ft_name}: {ft}. The fuzzing execution is slow. Keep monitoring..")
+            continue
+        coverage_theta = abs(cov - prev_cov) / (1 if prev_cov == 0 else prev_cov)
+        ft_theta = abs(ft - prev_ft) / (1 if prev_ft == 0 else prev_ft)
+        if coverage_theta < COVERAGE_SATURATION_THRESHOLD and ft_theta < COVERAGE_FT_SATURATION_THRESHOLD:
+            print(f"[+] Epoch: {epoch}, elapsed: {elapsed_time:.2f}s, prev_{cov_name}: {prev_cov}, curr_{cov_name}: {cov}, prev_{ft_name}: {prev_ft}, curr_{ft_name}: {ft}, coverage_theta: {coverage_theta:.5f}, ft_theta: {ft_theta:.5f}, threshold: {COVERAGE_SATURATION_THRESHOLD}. Coverage saturation reached. Exit.")
+            break
+        print(f"[+] Epoch: {epoch}, elapsed: {elapsed_time:.2f}s, prev_{cov_name}: {prev_cov}, curr_{cov_name}: {cov}, prev_{ft_name}: {prev_ft}, curr_{ft_name}: {ft}, coverage_theta: {coverage_theta:.5f}, ft_theta: {ft_theta:.5f}, threshold: {COVERAGE_SATURATION_THRESHOLD}. Continue fuzzing...")
+        prev_cov = cov
+        prev_ft = ft
+        prev_epoch = epoch
+
+    
+    fuzzer_info.state = FuzzerExecutionState.PLATEAU
+    fuzzer_info.execution_time = elapsed_time
+    fuzzer_info.finish_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S,%f")[:-3]
+    ProjectUtils.save_fuzzer_profile(fuzz_profile)
+    fuzzing_corpus_dir = ProjectUtils.get_fuzzer_fuzzing_corpus_dir(fuzzer_id)
+    cache_seeds_dir = ProjectUtils.get_fuzzer_cache_seeds_dir(fuzzer_id)
+    if get_fuzzing_engine() == FuzzingEngine.AFLpp:
+        queue_dirs = get_cache_fuzzer_queue_dirs(fuzzer_id)
+        efficient_corpus_minimization(fuzzer_id, cache_seeds_dir, queue_dirs)
+    else:
+        efficient_corpus_minimization(fuzzer_id, cache_seeds_dir, [fuzzing_corpus_dir])
+    return True, False
+
+def check_fuzzers(fuzzer_id: int):
+    # check fuzzer directory exists
+    fuzzer_dir = ProjectUtils.get_fuzzer_dir_by_id(fuzzer_id)
+    if not os.path.exists(fuzzer_dir):
+        print(f"[!] ERROR: The fuzzer dir {fuzzer_id} for fuzzer_id {ProjectUtils.get_fuzzer_str_by_id(fuzzer_id)} is not found!")
+        exit(-1)
+
+def check_execution(fuzzer_id: int):
+    fuzz_profile = ProjectUtils.get_fuzzer_profile()
+    fuzzer_info = fuzz_profile.fuzzers.get(fuzzer_id, None)
+    if fuzzer_info is None:
+        print(f"[!] ERROR:The fuzzer {ProjectUtils.get_fuzzer_str_by_id(fuzzer_id)} was not compiled by the `compile_and_check_harness` tool! Please **Exit** and report this issue to seek help.")
+        exit(-1)
+    if fuzzer_info.state == FuzzerExecutionState.NOT_EXECUTED:
+        return
+    if fuzzer_info.state == FuzzerExecutionState.FIXED:
+        return
+    if fuzzer_info.state == FuzzerExecutionState.CRASHED:
+        print(f"[!] ERROR: The fuzzer {ProjectUtils.get_fuzzer_str_by_id(fuzzer_id)} crashed during the last execution! Please **Exit** and report this issue to seek help, instead of running it again.")
+        exit(-1)
+    if fuzzer_info.state == FuzzerExecutionState.LIBRARY_BUG:
+        print(f"[!] WARN: The fuzzer {ProjectUtils.get_fuzzer_str_by_id(fuzzer_id)} had found bugs and completed its fuzzing task! You don't need to fuzz it again. Please **Exit** and report this issue to seek help.")
+        exit(0)
+    if fuzzer_info.state == FuzzerExecutionState.PLATEAU:
+        print(f"[!] WARN: The fuzzer {ProjectUtils.get_fuzzer_str_by_id(fuzzer_id)} had reached its coverage plateau during the last execution! Normally, you shouldn't waste additional resources on it and directly **Exit**.")
+        exit(0)
+
+
+def get_cache_fuzzer_output_dir(fuzzer_id: int) -> str:
+    fuzzer_dir = ProjectUtils.get_cache_fuzzer_dir(fuzzer_id)
+    output_dir = os.path.join(fuzzer_dir, "output")
+    return output_dir
+
+# used only for low execution speed fuzzers (e.g., ffmpeg and libvpx), to avoid the fuzzing execution is hanged by some large corpus files for a long time (e.g., 1 min for an input).
+def speeding_libfuzzer_by_fork(cmd: list, envs: dict, fuzz_log: str, output_dir: str, fuzzer_id: int, crash_dir: str):
+    min_cpu_count = min(10, multiprocessing.cpu_count()/2)
+    cmd.append(f"-fork={min_cpu_count}")
+    cmd.append("-keep_seed=1")
+    with open(fuzz_log, "w") as f:
+        proc = subprocess.Popen(cmd, env=envs, stdout=f, stderr=subprocess.STDOUT, cwd=output_dir, bufsize=1, text=True)
+        pid = proc.pid
+        try:
+            plateau, _ = execution_until_coverage_saturation(proc, fuzzer_id, fuzz_log, True)
+            if not plateau:
+                number_of_crashes = len(os.listdir(crash_dir))
+                print(f"[!] WARN: Fuzzer termianted due to find {number_of_crashes} crashes. Please check logs and triage these crashes.")
+        finally:
+                kill_fuzzer_process(pid)
+                proc.wait()
+
+def speeding_afl_by_fork(cmd: list, envs: dict, fuzz_log: str, output_dir: str, fuzzer_id: int, crash_dir: str):
+    min_cpu_count = min(10, int(multiprocessing.cpu_count()/2)) - 1
+    index = cmd.index("--")
+    master_cmd = cmd[:index] + ["-M", "default"] + cmd[index:]
+    procs = []
+    log_files = []
+    pid = None
+    try:
+        # start master process
+        master_f = open(fuzz_log, "w")
+        log_files.append(master_f)
+        master_proc = subprocess.Popen(master_cmd, env=envs, stdout=master_f, stderr=subprocess.STDOUT, cwd=output_dir, bufsize=1, text=True)
+        procs.append(master_proc)
+
+        # Start slave processes
+        log_base_dir = os.path.dirname(fuzz_log)
+        for i in range(min_cpu_count):
+            time.sleep(2) # stagger the start time of slave processes to avoid contention
+            slave_fuzz_log = os.path.join(log_base_dir, f"slave_{i}.log")
+            slave_f = open(slave_fuzz_log, "w")
+            log_files.append(slave_f)
+            afl_cmd = cmd[:index - 2] + ["-S", f"slave{i}"] + cmd[index:]
+            proc = subprocess.Popen(afl_cmd, env=envs, stdout=slave_f, stderr=subprocess.STDOUT, cwd=output_dir, bufsize=1, text=True)
+            procs.append(proc)
+        
+        plateau, _ = execution_until_coverage_saturation(proc, fuzzer_id, fuzz_log, True)
+        if not plateau:
+            number_of_crashes = len(os.listdir(crash_dir))
+            print(f"[!] WARN: Fuzzer termianted due to find {number_of_crashes} crashes. Please check logs and triage these crashes.")
+    finally:
+        # Terminate all slave processes gracefully
+        for proc in procs:
+            try:
+                kill_fuzzer_process(proc.pid, sig=signal.SIGTERM, include_parent=True)
+            except Exception as e:
+                print_debug(f"[!] ERROR: Failed to kill slave process {proc.pid}: {e}")
+        
+        # Wait for graceful termination
+        time.sleep(5)
+        
+        for proc in procs:
+            try:
+                kill_fuzzer_process(proc.pid, sig=signal.SIGKILL, include_parent=True)
+                proc.wait()
+            except Exception as e:
+                print_debug(f"[!] ERROR: Failed to force kill slave process {proc.pid}: {e}")
+        
+        # Close all log files
+        for log_f in log_files:
+            try:
+                log_f.close()
+            except Exception:
+                pass
+
+def run_fuzzer(fuzzer_id: int):
+    # check fuzzer directory
+    check_fuzzers(fuzzer_id)
+    # check fuzzer execution
+    check_execution(fuzzer_id)
+    # initialize fuzzing corpus
+    initialize_fuzzing_corpus(fuzzer_id)
+    print(f"[+] Starting fuzzer {fuzzer_id} with configuration:")
+    print(f"    - MAX_RUNNING_TIME: {MAX_RUNNING_TIME}s")
+    print(f"    - OBSERVATION_INTERVAL: {INTERVAL}s")
+    print(f"    - COVERAGE_SATURATION_THRESHOLD: {COVERAGE_SATURATION_THRESHOLD}")
+
+    fuzzer_dir = ProjectUtils.get_fuzzer_dir_by_id(fuzzer_id)
+
+    output_dir = get_cache_fuzzer_output_dir(fuzzer_id)
+    shutil.rmtree(output_dir, ignore_errors=True)
+    os.makedirs(output_dir, exist_ok=True)
+
+    log_dir = os.path.join(fuzzer_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    fuzz_log = os.path.join(log_dir, "fuzz_execution.log")
+
+    fuzzer = ProjectUtils.get_fuzzer_binary_by_id(fuzzer_id)
+    fuzzing_corpus_dir = ProjectUtils.get_fuzzer_fuzzing_corpus_dir(fuzzer_id)
+    crash_dir = ProjectUtils.get_fuzzer_crash_dir(fuzzer_id)
+
+    sandbox_cmd = [
+        "bwrap",
+        "--ro-bind", "/", "/",       # 1. mount root directory as read-only (Read-Only)
+        "--dev", "/dev",             # 2. mount /dev (program usually needs /dev/null, /dev/random)
+        "--proc", "/proc",           # 3. mount /proc (if program needs to check process information)
+        "--unshare-net",             
+        "--bind", output_dir, output_dir, # 4. mount output_dir as read-write (Read-Write)
+        "--bind", crash_dir, crash_dir, # 5. mount crash_dir as read-write (Read-Write)
+        "--tmpfs", "/tmp",           # Provide an isolated in-memory /tmp for mkstemp
+        "--die-with-parent",         # 6. parent process dies, child process dies too
+        "--new-session",           # 7. create new process session
+    ]
+
+    envs = os.environ.copy()
+    dictionary_file = ProjectUtils.get_fuzzing_dictionary_file()
+    if get_fuzzing_engine() == FuzzingEngine.AFLpp:
+        envs["AFL_SKIP_CPUFREQ"] = "1"
+        envs["AFL_BENCH_UNTIL_CRASH"] = "1"
+        envs["AFL_NO_UI"] = "1"
+        envs["AFL_CRASHING_SEEDS_AS_NEW_CRASH"] = "1"
+        envs["AFL_DRIVER_CLOSE_FD_MASK"] = "3"
+        envs["AFL_SYNC_TIME"] = "3"
+        envs["AFL_FUZZER_STATS_UPDATE_INTERVAL"] = "10"
+        envs["ASAN_OPTIONS"] = "abort_on_error=1:detect_leaks=1:exitcode=23:symbolize=0"
+        envs["UBSAN_OPTIONS"] = "halt_on_error=1:print_stacktrace=1:exitcode=23:symbolize=0"
+        envs["AFL_CRASH_EXITCODE"] = "23"
+        envs["AFL_FAST_CAL"] = "1"
+        envs["AFL_CMPLOG_ONLY_NEW"] = "1"
+        cache_fuzzer_dir = ProjectUtils.get_cache_fuzzer_dir(fuzzer_id)
+        cmp_fuzzer_binary = os.path.join(cache_fuzzer_dir, CMPLOG_FUZZER)
+        cmd = sandbox_cmd + ["stdbuf", "-oL", "-eL", "afl-fuzz", "-i", fuzzing_corpus_dir, "-o", output_dir, "-x", dictionary_file, "-t", "60000", "-c", cmp_fuzzer_binary, "--", fuzzer, "@@"]
+    else:
+        cmd = sandbox_cmd + ["stdbuf", "-oL", "-eL", fuzzer, "-use_value_profile=1", f"-artifact_prefix={crash_dir}/", "-close_fd_mask=3", "-report_slow_units=60", "-detect_leaks=0", "-ignore_crashes=1", fuzzing_corpus_dir, "-dict=" + dictionary_file]
+    cmd_str = " ".join(cmd)
+    fork = False
+    with open(fuzz_log, "w") as f:
+        proc = subprocess.Popen(cmd, env=envs, stdout=f, stderr=subprocess.STDOUT, cwd=output_dir, bufsize=1, text=True)
+        print(f"[+] Fuzzer started with cmd: {cmd_str}")
+        print(f"[+] Fuzzer execution message logged in the file: {fuzz_log}")
+        try:
+            plateau, fork = execution_until_coverage_saturation(proc, fuzzer_id, fuzz_log, False)
+            if not plateau and not fork:
+                number_of_crashes = len(os.listdir(crash_dir))
+                print(f"[!] WARN: Fuzzer termianted due to find {number_of_crashes} crashes. Please check logs and triage these crashes.")
+        finally:
+            kill_fuzzer_process(proc.pid, sig=signal.SIGTERM, include_parent=True)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                kill_fuzzer_process(proc.pid, sig=signal.SIGKILL, include_parent=True)
+                proc.wait()
+    if fork:
+        print(f"[+] Restarting fuzzer with fork mode to speed up fuzzing execution...")
+        shutil.rmtree(output_dir, ignore_errors=True)
+        os.makedirs(output_dir, exist_ok=True)
+        if get_fuzzing_engine() == FuzzingEngine.AFLpp:
+            speeding_afl_by_fork(cmd, envs, fuzz_log, output_dir, fuzzer_id, crash_dir)
+        else:
+            speeding_libfuzzer_by_fork(cmd, envs, fuzz_log, output_dir, fuzzer_id, crash_dir)
+
+def kill_fuzzer_process(pid:int, sig=signal.SIGTERM, include_parent=True):
+    try:
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True) # Recursively get all child processes
+        for child in children:
+            try:
+                child.send_signal(sig)
+            except Exception:
+                pass
+        if include_parent:
+            try:
+                parent.send_signal(sig)
+            except Exception:
+                pass
+        try:
+            _, alive = psutil.wait_procs(children, timeout=5)
+            for p in alive:
+                p.kill()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    fork_temp_dir = os.path.join("/tmp", f"libFuzzerTemp.FuzzWithFork{pid}.dir")
+    if os.path.exists(fork_temp_dir):
+        file_path = os.path.join(fork_temp_dir, "STOP")
+        stop_file = Path(file_path)
+        stop_file.touch()
+
+
+def force_override_fuzzer_execution_state(fuzzer_id: int):
+    # reset fuzzer execution state
+    fuzz_profile = ProjectUtils.get_fuzzer_profile()
+    fuzzer_info = fuzz_profile.fuzzers.get(fuzzer_id, None)
+    if fuzzer_info is None:
+        return
+    if fuzzer_info.state == FuzzerExecutionState.PLATEAU:
+        fuzzer_info.state = FuzzerExecutionState.NOT_EXECUTED
+        fuzzer_info.finish_time = ""
+    ProjectUtils.save_fuzzer_profile(fuzz_profile)
+
+    # delete previous coverage data
+    coverage_dir = ProjectUtils.get_fuzzer_coverage_dir(fuzzer_id)
+    if os.path.exists(coverage_dir):
+        shutil.rmtree(coverage_dir)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        "run_fuzz_target", "run the fuzzer taget until it reaches code coverage plateau."
+    )
+    parser.add_argument(
+        "fuzzer_id", type=int, help="The fuzzer instance ID to run. E.g., 000, 001, etc."
+    )
+    parser.add_argument(
+        "force_override", nargs="?", type=str, help="Force override the existing fuzzing corpus and run the fuzzer again."
+    )
+    args = parser.parse_args()
+    fuzzer_id = args.fuzzer_id
+    force_override = args.force_override
+    if force_override is not None and force_override == "override":
+        force_override_fuzzer_execution_state(fuzzer_id)
+    run_fuzzer(fuzzer_id) 

@@ -1,0 +1,76 @@
+tools:
+  show_overview_code_coverage:
+    timeout: 1200
+    signature: show_overview_code_coverage
+    docstring: Displays the overall code coverage statistics for the project.
+  show_module_code_coverage:
+    timeout: 1200
+    signature: show_module_code_coverage <path> <page> [options]
+    docstring: Displays the module-level code coverage statistics for the project.
+    arguments:
+      - name: path
+        type: string
+        description: The path to the module to show coverage for. In this tool, the default path is '/' representing the location of the project.
+        required: true
+      - name: page
+        type: integer
+        description: The page number to show coverage for. Defaults to 1.
+        required: true
+  show_file_code_coverage:
+    timeout: 1200
+    signature: show_file_code_coverage  <page> [options]
+    docstring: Displays the file-level code coverage statistics for the project.
+    arguments:
+      - name: page
+        type: integer
+        description: The page number to show coverage for. Defaults to 1.
+        required: true
+  show_api_code_coverage:
+    timeout: 1200
+    signature: show_api_code_coverage <page> [options]
+    docstring: Displays the API-level code coverage statistics for the project.
+    arguments:
+      - name: page
+        type: integer
+        description: The page number to show coverage for. Defaults to 1.
+        required: true
+  show_func_code_coverage:
+    timeout: 1200
+    signature: show_func_code_coverage <page> <search_func> [options]
+    docstring: Displays the function-level code coverage statistics for the project.
+    arguments:
+      - name: page
+        type: integer
+        description: The page number to show coverage for. Defaults to 1.
+        required: true
+      - name: search_func
+        type: string
+        description: The function name to search (not regex), all matches will be displayed. Defaults to ''.
+        required: false
+  show_branch_blocker_code_coverage:
+    timeout: 1200
+    signature: show_branch_blocker_code_coverage
+    docstring: Displays the branch blocker-level code coverage statistics for the project.
+  call_chain_analysis:
+    timeout: 1200
+    signature: call_chain_analysis <target_func>
+    docstring: Analyze the call graph to find the shortest call traces from public APIs to the target function. This help you understand how to reach the target function from public APIs.
+    arguments:
+      - name: target_func
+        type: string
+        description: The target function to analyze the call chain to.
+        required: true
+  generate_coverage_guidance_report:
+    timeout: 10
+    signature: generate_coverage_guidance_report <harness_id> <content>
+    docstring: Generates a coverage analysis report for the next harness and save it to the coverage guidance directory.
+    arguments:
+      - name: harness_id
+        type: integer
+        description: The ID of the next harness to generate the coverage guide report for.
+        required: true
+      - name: content
+        type: string
+        description: The content of the coverage analysis report.
+        required: true
+        redirect: true

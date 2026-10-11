@@ -1,0 +1,10 @@
+tools:
+  run_fuzz_target:
+    timeout: 3900
+    signature: run_fuzz_target <fuzzer_id>
+    docstring: A custom wrapper to run a fuzz target with a specific fuzzer instance ID. It automatically loads the fuzzing corpus and dictionaries for the specified fuzzer instance and sets the appropriate arguments to run the fuzz target. You should always use this tool to run your fuzzers. If you use any other command to start a fuzzer, it will not be in the timeout whitelist, causing the fuzzer to run for only a very short time before exiting immediately.
+    arguments:
+      - name: fuzzer_id
+        type: integer
+        description: The fuzzer instance ID to run. E.g., 000, 001, etc.
+        required: true

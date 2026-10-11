@@ -1,0 +1,35 @@
+tools:
+  bash:
+    timeout: 120
+    signature: bash <command>
+    docstring: Run a command to interact with the system.
+    arguments:
+      - name: command
+        type: string
+        description: The command to run to interact with the system. If you need to search one file/directory or read/edit file contents, __PLEASE USE THE PROVIDED FUNCTIONS (open, edit, find_file, goto, scroll_up, scroll_down, write_file, etc.)__ rather than Linux commands (e.g. cat, less, more, fine, head, tail, find, echo, etc.).
+        required: true
+  send_agent_task:
+    signature: send_agent_task <agent_name> <task_description>
+    docstring: Send a task to a specific agent.
+    arguments:
+      - name: agent_name
+        type: string
+        description: The name of the agent to send the task to.
+        enum: ["BuilderAgent", "DictionaryAgent", "SeedAgent", "HarnessAgent", "CoverageAnalyzerAgent", "FuzzerExecutorAgent", "CrashAnalyzerAgent"]
+        required: true
+      - name: task_description
+        type: string
+        description: The detailed description of the task to send to the agent.
+        required: true
+  exit:
+    signature: exit <exit_reason> <force>
+    docstring: Exit the task. You can only exit the task when you are sure your task is finished. 
+    arguments:
+      - name: exit_reason
+        type: string
+        description: The reason to exit the task. You should always report your task status before exiting the task.
+        required: true
+      - name: force
+        type: boolean
+        description: Force to exit the task regardless of user reminders and restrictions. Only use this option when you encountered fatal errors and cannot be fixed in current task loop.
+        required: false

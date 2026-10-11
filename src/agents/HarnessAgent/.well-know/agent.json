@@ -1,0 +1,54 @@
+{
+    "name": "HarnessAgent",
+    "description": "Act as an expert fuzzing test engineer specializing in generating effective fuzzing harnesses, and fixing harness errors. It generates single fuzzing harness per iteration and can accept user guidance to generate high-quality fuzzing harnesses. You can provide your specific targets (e.g., APIs) for generating fuzzing harnesses or specific harness error messages to fix them.",
+    "url": "https://localhost",
+    "provider": {
+      "organization": "FuzzAgent",
+      "url": "https://fuzzagent.com"
+    },
+    "version": "1.0.0",
+    "authentication": {
+      "schemes": ["OAuth2"]
+    },
+    "defaultInputModes": ["text/plain"],
+    "defaultOutputModes": ["text/plain"],
+    "capabilities": {
+      "streaming": true,
+      "pushNotifications": false
+    },
+    "skills": [
+      {
+        "id": "harness_generation",
+        "name": "Generate Fuzzing Harness",
+        "description": "Generate targeted fuzzing harnesses based on specific requirements and guidance from Manager. Focuses on creating semantically unique harnesses that target specific APIs, functions, or coverage gaps as identified by coverage analysis. Always analyzes existing harnesses to ensure differentiation and avoid homogenization.",
+        "tags": ["fuzzing", "harness", "generate", "guidance", "targeted-generation", "anti-homogenization", "semantic-diversity", "existing-analysis"],
+        "examples": [
+          "Based on Manager's coverage analysis, generate harness_004.cpp targeting:\n- UNCOVERED FUNCTIONS: error_handler() [0% coverage], memory_cleanup() [5% coverage]\n- MODULE: memory_management.c [current coverage: 22%]\n- STRATEGY: Trigger memory allocation failures and cleanup scenarios\n- DIFFERENTIATION: Unlike existing harnesses focused on normal operations, target error paths and resource exhaustion\n- API SEQUENCE: allocate_buffer() -> (inject failure) -> error_handler() -> memory_cleanup()\nProject: $SRC, Headers: $HEADER. Start by analyzing existing harnesses to ensure semantic diversity."
+        ],
+        "outputModes": ["text/plain"]
+      },
+      {
+        "id": "validate_harness",
+        "name": "Compile and Validate Fuzzing Harness",
+        "description": "Ensure the correctness of a fuzzing harness",
+        "tags": ["compile", "validation", "harness"],
+        "examples": [
+          "Compile the fuzzing harness {harness_path} and validate its correctness by checking for compilation errors, linking issues, and ensuring it is properly instrumented for fuzzing.",
+          "Compile the harness located {harness_path} by compiling it with the target project and checking the symbol table to ensure all intended functions are correctly referenced and instrumented."
+        ],
+        "outputModes": ["text/plain"]
+      },
+      {
+        "id": "fix_harness",
+        "name": "Fix Errors in Existing Fuzzing Harness",
+        "description": "Diagnose and fix logical errors, memory issues or functional problems in a fuzzing harness.",
+        "tags": ["debugging", "error-fixing", "sanitizers", "crash-analysis"],
+        "examples": [
+          "Somebody encountered many spurious crashes during the fuzzing process of the harness: {harness_path}. Here are the error messages, please fix those errors in this harness. {errors}",
+          "The harness causes segmentation fault when fuzzing {API}, analyze stack trace {TRACE} and suggest fixes",
+          "Fix memory leaks detected by {SANITIZER} in this harness code: {CODE_SNIPPET}"
+        ],
+        "outputModes": ["text/plain"]
+      }
+    ]
+  }

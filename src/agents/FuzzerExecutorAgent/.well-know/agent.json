@@ -1,0 +1,31 @@
+{
+    "name": "FuzzerExecutorAgent",
+    "description": "An expert fuzzing test automation system with comprehensive capabilities for executing, monitoring, and optimizing fuzzing campaigns. The agent specializes in dynamic program analysis, fault detection, and fuzzing process optimization across various fuzzer types (coverage-guided, grammar-based, mutational, etc.).",
+    "url": "https://localhost",
+    "provider": {
+      "organization": "FuzzAgent",
+      "url": "https://fuzzagent.com"
+    },
+    "version": "1.0.0",
+    "authentication": {
+      "schemes": ["OAuth2"]
+    },
+    "defaultInputModes": ["text/plain"],
+    "defaultOutputModes": ["text/plain"],
+    "capabilities": {
+      "streaming": true,
+      "pushNotifications": false
+    },
+    "skills": [
+      {
+        "id": "fuzzer_execution",
+        "name": "Fuzzer Execution",
+        "description": "Executes fuzzing campaigns on the specified fuzz targets. Automatically adjusts parameters based on observed behavior.",
+        "tags": ["fuzzing", "fuzzing-execution", "security-testing"],
+        "examples": [
+          "Perform fuzzing on {fuzz_target} (source harness at {harness_path})"
+        ],
+        "outputModes": ["text/plain"]
+      }
+    ]
+}

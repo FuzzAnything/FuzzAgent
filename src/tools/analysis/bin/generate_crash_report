@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""
+Non-interactive tool to create a normalized crash report file for a fuzzer.
+
+This variant accepts positional arguments (no explicit --name= required for the main inputs).
+Usage: generate_crash_report "<fuzzer_id>" "<crash_input>" "<content>"
+"""
+import argparse
+import os
+import sys
+from pathlib import Path
+import re
+from project_utils import FuzzerExecutionState, ProjectUtils
+import shutil
+import select
+
+# @yaml
+# generate_crash_report:
+# signature: |-
+#   generate_crash_report "<fuzzer_id>" "<crash_input>" "<content>
+# docstring: Create a normalized crash report file for a given fuzzer and crash input.
+#   - Writes a markdown report file named `fuzzer_<fuzzer_id>_crash_<crash_id>_report.md`.
+#   - `content` is the full markdown report text passed positionally (quoted on the command line).
+# arguments:
+#   - name: fuzzer_id
+#     type: integer
+#     description: The fuzzer instance ID to generate the crash report for. E.g., 000, 001, etc.
+#     required: true
+#   - name: crash_input
+#     type: string
+#     description: Path to the crash input file used for provenance
+#     required: true
+#   - name: content
+#     type: string
+#     description: Report content as a string. Provide the full markdown text quoted on the command line.
+#     required: true
+
+
+def read_with_timeout(timeout_sec):
+    # Check if stdin is a readable stream, `timeout_sec` is the timeout in seconds
+    rlist, _, _ = select.select([sys.stdin], [], [], timeout_sec)
+    if rlist:  # If there is data to read
+        return sys.stdin.read()
+    else:  # Timeout occurred
+        raise TimeoutError("No input received within the timeout period")
+
+def generate_crash_report(fuzzer_id: int, crash_artifact_path: str, triage: str, content: str) -> None:
+    if not os.path.exists(crash_artifact_path):
+        print(f"[!] ERROR: Crash input file does not exist: {crash_artifact_path}")
+        exit(-1)
+    fuzzer_binary = ProjectUtils.get_fuzzer_binary_by_id(fuzzer_id)
+    if not os.path.exists(fuzzer_binary):
+        print(f"!] ERROR: fuzzer binary does not exist: {fuzzer_binary}")
+        exit(-1)
+    
+    crash_report_dir = ProjectUtils.get_project_crash_report_dir()
+    crash_id = len(os.listdir(crash_report_dir))
+    crash_save_dir = os.path.join(crash_report_dir, f"crash_{crash_id:03d}")
+    if not os.path.exists(crash_save_dir):
+        os.makedirs(crash_save_dir, exist_ok=True)
+    
+    crash_report_path = os.path.join(crash_save_dir, f"crash_report.md")
+    with open(crash_report_path, 'w') as f:
+        f.write(f"## Fuzzer ID: {fuzzer_id}\n")
+        f.write(f"## Crash Artifact: {os.path.basename(crash_artifact_path)}\n")
+        f.write(f"## Triage: {triage}\n")
+        f.write(f"## Content:\n")
+        f.write(content)
+    shutil.copy2(crash_artifact_path, os.path.join(crash_save_dir, os.path.basename(crash_artifact_path)))
+    shutil.copy2(fuzzer_binary, os.path.join(crash_save_dir, os.path.basename(fuzzer_binary)))
+
+    crash_harness_path = ProjectUtils.get_harness_path_by_id(fuzzer_id)
+    shutil.copy2(crash_harness_path, os.path.join(crash_save_dir, os.path.basename(crash_harness_path)))
+
+    fuzzer_dir = ProjectUtils.get_fuzzer_dir_by_id(fuzzer_id)
+    poc_file_path = os.path.join(fuzzer_dir, "poc.cpp")
+    if os.path.exists(poc_file_path):
+        shutil.copy2(poc_file_path, os.path.join(crash_save_dir, os.path.basename(poc_file_path)))
+    
+    poc_path = os.path.join(fuzzer_dir, "poc")
+    if os.path.exists(poc_path):
+        shutil.copy2(poc_path, os.path.join(crash_save_dir, os.path.basename(poc_path)))
+
+    print(f"[*] Crash report generated successfully: {crash_save_dir}")
+    fuzz_profile = ProjectUtils.get_fuzzer_profile()
+
+    if triage == "harness-bug":
+        fuzz_profile.fuzzers[fuzzer_id].state = FuzzerExecutionState.HARNESS_BUG
+    elif triage == "library-bug":
+        fuzz_profile.fuzzers[fuzzer_id].state = FuzzerExecutionState.LIBRARY_BUG
+    ProjectUtils.save_fuzzer_profile(fuzz_profile)
+
+
+def abort_on_missing_harness_minimization(fuzzer_id: int, triage: str):
+    if triage != "library-bug":
+        return
+    fuzzer_dir = ProjectUtils.get_fuzzer_dir_by_id(fuzzer_id)
+    poc_file = os.path.join(fuzzer_dir, "poc.cpp")
+    if os.path.exists(poc_file):
+        return
+    print(f"[!] Warning: You marked this crash as a library bug, but no harness minimization was executed which could lead to inaccurate triage. Please perform a harness minimization and thorough debugging before marking a library bug.")
+    print("[!] Warning: The crash report will not be generated. Exit!")
+    exit(-1)
+
+def abort_on_missing_crash_debugging(fuzzer_id: int, triage: str):
+    if triage != "library-bug":
+        return
+    fuzzer_cache_dir = ProjectUtils.get_cache_fuzzer_dir(fuzzer_id)
+    for file in os.listdir(fuzzer_cache_dir):
+        if file.startswith("gdb_history_") and file.endswith(".txt"):
+            return
+    print(f"[!] Warning: You marked this crash as a library bug, but no crash debugging was executed which could lead to inaccurate triage. Please perform a thoroughly crash debugging before marking a library bug.")
+    print("[!] Warning: The crash report will not be generated. Exit!")
+    exit(-1)
+
+
+if __name__ == "__main__":
+    usage = 'Usage: generate_crash_report "<fuzzer_id>" "<crash_artifact_path>" "<triage>" "<content>"'
+    parser = argparse.ArgumentParser(description="Generate normalized crash report file", usage=usage)
+    # positional args (content is positional to make it non-interactive)
+    parser.add_argument('fuzzer_id', type=int, help='The fuzzer instance ID to generate the crash report for. E.g., 000, 001, etc.')
+    parser.add_argument('crash_artifact_path', help='Path to the crash input file that caused the crash, which is usually named as "crash-<hash>", must be a file, not a directory')
+    parser.add_argument('triage', help='The triage result of the crash, e.g., "library-bug", "harness-bug"')
+
+
+    args = parser.parse_args()
+    try:
+        content = read_with_timeout(3)
+    except TimeoutError as e:
+        raise Exception(f"{e}\n{usage}")
+        
+    fuzzer_id = args.fuzzer_id
+    crash_artifact_path = args.crash_artifact_path
+    triage = args.triage
+    if triage not in ["library-bug", "harness-bug"]:
+        print(f"[!] ERROR: Invalid triage result: {triage}. Must be one of: [library-bug, harness-bug]")
+        exit(-1)
+
+    abort_on_missing_harness_minimization(fuzzer_id, triage)
+    abort_on_missing_crash_debugging(fuzzer_id, triage)
+
+    generate_crash_report(fuzzer_id, crash_artifact_path, triage, content)
+
+
+
+
+

@@ -1,0 +1,506 @@
+#!/usr/bin/env python3
+
+import argparse
+from codecs import ignore_errors
+import subprocess, sys, os
+import shutil
+import time
+import re
+from typing import List
+
+from elftools import elf
+from project_utils import get_fuzzing_engine, FuzzingEngine, BASIC_CFLAGS, BASIC_CXXFLAGS, SANCOV_CFLAGS, SANCOV_CXXFLAGS, SANCOV_SYMBOLS, CompileKind, ProjectUtils, FUZZAGENT_DEBUG, SANITIZER_CFLAGS, SANITIZER_CXXFLAGS, FUZZER_CFLAGS, FUZZER_CXXFLAGS, COVERAGE_CFLAGS, COVERAGE_CXXFLAGS, WLLVM_FLAGS, BASIC_SYMBOLS, SANITIZER_SYMBOLS, COVERAGE_SYMBOLS, check_subprocess_output, print_debug, OSSUtils, OSSCacheKind
+
+
+class LibraryBuilder:
+    def __init__(self, build_script_path: str):
+        self.output_dir = ProjectUtils.get_project_build_dir()
+        self.build_script_path = build_script_path
+        self.initital_check()
+
+    def initital_check(self):
+        if not os.path.exists(self.build_script_path) or not os.path.isfile(self.build_script_path):
+            raise Exception(f"Build script {self.build_script_path} does not exist!")
+
+        print(f"[+] buid script exist: {self.build_script_path}")
+
+        if not os.access(self.build_script_path, os.X_OK):
+            raise Exception(f"Build script {self.build_script_path} is not executable!")
+
+        print(f"[+] buid script is executable: {self.build_script_path}")
+
+        if not os.path.exists(self.output_dir) or not os.path.isdir(self.output_dir):
+            raise Exception(f"Output directory {self.output_dir} does not exist!")
+
+    def print_envs(self, envs, kind: CompileKind):
+        src = envs.get("SRC")
+        work_dir = envs.get("WORK")
+        cc = envs.get("CC")
+        cxx = envs.get("CXX")
+        cflags = envs.get("CFLAGS")
+        cxxflags = envs.get("CXXFLAGS")
+        
+        self.necessary_print("[+] Environment variables:", kind)
+        if src:
+            self.necessary_print(f"  SRC: {src}", kind)
+        else:
+            print("  [!] SRC environment variable is not set")
+            exit(-1)
+            
+        if work_dir:
+            self.necessary_print(f"  WORK: {work_dir}", kind)
+        else:
+            print("  [!] WORK environment variable is not set")
+            exit(-1)
+            
+        if cc:
+            self.necessary_print(f"  CC: {cc}", kind)
+        else:
+            os.environ["CC"] = "clang"
+            
+        if cxx:
+            self.necessary_print(f"  CXX: {cxx}", kind)
+        else:
+            os.environ["CXX"] = "clang++"
+            
+        if cflags:
+            self.necessary_print(f"  CFLAGS: {cflags}", kind)
+        else:
+            print("  [!] CFLAGS environment variable is not set")
+            
+        if cxxflags:
+            self.necessary_print(f"  CXXFLAGS: {cxxflags}", kind)
+        else:
+            print("  [!] CXXFLAGS environment variable is not set")
+
+    # only print for necessary compile kinds
+    def necessary_print(self, content: str, kind: CompileKind):
+        if FUZZAGENT_DEBUG:
+            print(content)
+        elif kind == CompileKind.Fuzzer or kind == CompileKind.Coverage:
+            print(content)
+
+    def cleanup_lib_dir(self, lib_dir: str):
+        for file in os.listdir(lib_dir):
+            path = os.path.join(lib_dir, file)
+            if file.endswith(".a") or file.endswith(".so"):
+                continue
+            shutil.rmtree(path, ignore_errors=True)
+
+    def merge_multiple_static_libraries(self, static_libs: List[str], lib_dir: str, third_party_libs: List[str], kind: CompileKind):
+        lib_name = ProjectUtils.get_project_name()
+        target_lib = f"{lib_name}.a" if lib_name.startswith("lib") else f"lib{lib_name}.a"
+        if target_lib in os.listdir(lib_dir):
+            return
+        self.necessary_print(f"[+] Merging multiple static libraries {[os.path.basename(static_lib) for static_lib in static_libs]} into a single static library {target_lib}...", kind)
+        self.necessary_print(f"[!] WARNING: If there are 3rd party libraries in the merging, please put the 3rd party libraries in the `$WORK/3rdparty` directory and then build the library again!", kind)
+        merge_mri = f"create {target_lib}\n"
+        for static_lib in static_libs:
+            merge_mri += f"addlib {static_lib}\n"
+        #for third_party_lib in third_party_libs:
+        #    merge_mri += f"addlib {third_party_lib}\n"
+        merge_mri += "save\nend\n"
+        print_debug(f"[+] Running command: ar -M")
+        cmd = ["ar", "-M"]
+        output = subprocess.run(cmd, input=merge_mri.encode("utf-8"), stderr=subprocess.PIPE, stdout=subprocess.PIPE, cwd=lib_dir)
+        check_subprocess_output(output)
+
+    def get_archive_members(self, static_lib: str) -> set[str]:
+        cmd = ["ar", "t", static_lib]
+        output = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        check_subprocess_output(output)
+        members = output.stdout.decode("utf-8", errors="ignore").splitlines()
+        # Ignore empty lines and use member names as a set for subset checks.
+        return {member.strip() for member in members if member.strip()}
+
+    def remove_subset_static_libraries(self, static_libs: List[str]) -> List[str]:
+        if len(static_libs) <= 1:
+            return static_libs
+
+        members_by_lib = {}
+        for static_lib in static_libs:
+            members_by_lib[static_lib] = self.get_archive_members(static_lib)
+
+        remove_libs = set()
+        for lib_a in static_libs:
+            members_a = members_by_lib.get(lib_a, set())
+            if not members_a:
+                continue
+            for lib_b in static_libs:
+                if lib_a == lib_b:
+                    continue
+                members_b = members_by_lib.get(lib_b, set())
+                if members_a.issubset(members_b):
+                    remove_libs.add(lib_a)
+                    break
+
+        if not remove_libs:
+            return static_libs
+
+        for remove_lib in sorted(remove_libs):
+            if os.path.exists(remove_lib):
+                print(f"[+] Remove subset static library as duplicate: {os.path.basename(remove_lib)}")
+                os.remove(remove_lib)
+
+        return [lib for lib in static_libs if lib not in remove_libs]
+
+    def generage_shared_libaries(self, shared_libs: List[str], lib_dir: str, third_party_libs: List[str], kind: CompileKind):
+        lib_name = ProjectUtils.get_project_name()
+        target_static_lib = ProjectUtils.get_project_static_lib_from_dir(lib_dir)
+        target_shared_lib = f"{lib_name}.so" if lib_name.startswith("lib") else f"lib{lib_name}.so"
+        if target_shared_lib in shared_libs:
+            return
+        cmd = ["clang++", "-shared", "-fPIC", "-o", target_shared_lib, "-fuse-ld=lld", "-Wl,--whole-archive", target_static_lib, "-Wl,--no-whole-archive", "-Wl,--allow-multiple-definition", "-ldl", "-lpthread", "-lz", "-lm"]
+        for third_party_lib in third_party_libs:
+            cmd.append(third_party_lib)
+        output = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, cwd=lib_dir)
+        # Tolerate the error of multiple definition when generating shared library. Because we have used the flag -Wl,--allow-multiple-definition to allow multiple definition in the shared library, so it could be possible that the linker will report multiple definition errors with various instrumentations. We only require the shared library to be generated successfully for coverage build.
+        if kind != CompileKind.Coverage: 
+            return
+        check_subprocess_output(output)
+        if not os.path.exists(ProjectUtils.get_project_shared_lib_from_dir(lib_dir)):
+            raise Exception(f"[!] ERROR: Failed to generate shared library {target_shared_lib}! Please check your build script!")
+
+
+    def postprocess_static_libraries(self, static_libs: List[str], shared_libs: List[str], lib_dir: str, third_party_libs: List[str], kind: CompileKind):
+        #static_libs = self.remove_subset_static_libraries(static_libs)
+        if len(static_libs) > 1:
+            self.merge_multiple_static_libraries(static_libs, lib_dir, third_party_libs, kind)
+        self.generage_shared_libaries(shared_libs, lib_dir, third_party_libs, kind)
+        
+    def download_cached_build_artifacts(self, kind: CompileKind):
+        if not kind in [CompileKind.CMPLOG, CompileKind.Fuzzer]:
+            return False
+        if kind == CompileKind.Fuzzer and get_fuzzing_engine() == FuzzingEngine.AFLpp:
+            if not ProjectUtils.is_huge_library():
+                return False
+        self.necessary_print(f"[+] Checking cached build artifacts for {kind} in OSS...", kind)
+        work_dir = ProjectUtils.get_build_work_dir(kind)
+        cached_lib = f"{work_dir}.tar.gz"
+        cache_kind = OSSCacheKind.Cmplog if kind == CompileKind.CMPLOG else OSSCacheKind.AFLInstrument
+        if OSSUtils.download_file_from_oss_cache(cached_lib, cache_kind=cache_kind):
+            if os.path.exists(cached_lib):
+                shutil.unpack_archive(cached_lib, work_dir)
+                os.remove(cached_lib)
+                self.necessary_print(f"[+] Successfully downloaded and extracted cached build artifacts for {kind} from OSS.", kind)
+                return True
+        return False
+    
+    def upload_build_artifacts_to_cache(self, kind: CompileKind):
+        if not kind in [CompileKind.CMPLOG, CompileKind.Fuzzer]:
+            return False
+        if kind == CompileKind.Fuzzer and get_fuzzing_engine() == FuzzingEngine.AFLpp:
+            if not ProjectUtils.is_huge_library():
+                return False
+        work_dir = ProjectUtils.get_build_work_dir(kind)
+        cached_lib = f"{work_dir}.tar.gz"
+        shutil.make_archive(work_dir, 'gztar', work_dir)
+        cache_kind = OSSCacheKind.Cmplog if kind == CompileKind.CMPLOG else OSSCacheKind.AFLInstrument
+        OSSUtils.upload_file_to_oss_cache(cached_lib, cache_kind=cache_kind)
+        self.necessary_print(f"[+] Successfully uploaded cached build artifacts {cached_lib} to OSS.", kind)
+        if os.path.exists(cached_lib):
+            os.remove(cached_lib)
+
+    def build_library(self, kind: CompileKind, cflags: str = "", cxxflags: str = ""):
+        start_time = time.time()
+        ProjectUtils.copy_project_source()
+        work_dir = ProjectUtils.get_build_work_dir(kind)
+
+        if os.path.exists(work_dir):
+            shutil.rmtree(work_dir)
+        
+        if self.download_cached_build_artifacts(kind):
+            end_time = time.time()
+            self.necessary_print(f"[+] Library build with {kind} instrumentation succeeded (Time taken: {end_time - start_time:.2f} seconds)", kind)
+            return
+
+        if not os.path.exists(work_dir):
+            os.makedirs(work_dir, exist_ok=True)
+
+        envs = os.environ.copy()
+        envs["WORK"] = work_dir
+        if (kind == CompileKind.Fuzzer or kind == CompileKind.CMPLOG) and get_fuzzing_engine() == FuzzingEngine.AFLpp:
+            envs["CC"] = "afl-clang-lto"
+            envs["CXX"] = "afl-clang-lto++"
+            envs["LD"]  = "afl-clang-lto++"
+            envs["AFL_USE_ASAN"] = "1"
+            envs["AFL_USE_UBSAN"] = "1"
+            envs["CMAKE_LIBRARY_PATH"] = "/usr/lib/x86_64-linux-gnu" # see https://github.com/AFLplusplus/AFLplusplus/issues/2756
+            if kind == CompileKind.CMPLOG:
+                envs["AFL_USE_CMPLOG"] = "1"
+        elif kind == CompileKind.WLLVM:
+            envs["LLVM_COMPILER"] = "clang"
+            envs["CC"] = "wllvm"
+            envs["CXX"] = "wllvm++"
+        else:
+            envs["CC"] = "clang"
+            envs["CXX"] = "clang++"
+            envs["LD"]  = "clang++"
+        envs["CFLAGS"] = cflags
+        envs["CXXFLAGS"] = cxxflags
+        envs["LDFLAGS"] = cxxflags
+
+        # Run the build script
+        cmd = ["bash", f"{self.build_script_path}"]
+        self.print_envs(envs, kind)
+        self.necessary_print(f"[+] Running build script to instrument {kind}: {self.build_script_path}", kind)
+        output = subprocess.run(cmd, env=envs, stderr=subprocess.PIPE, stdout=subprocess.PIPE, cwd=ProjectUtils.get_source_code_dir())
+        check_subprocess_output(output)
+
+        self.necessary_print(f"[+] Running build script finished. Exit code: 0", kind)
+
+        if not os.path.exists(work_dir):
+            raise Exception(f"The WORK directory {work_dir} does not exist!")
+
+        include_dir = os.path.join(work_dir, "include")
+        if not os.path.exists(include_dir):
+            raise Exception(f"The $WORK/include directory {include_dir} does not exist!")
+
+        if not os.listdir(include_dir):
+            raise Exception(f"The $WORK/include directory {include_dir} is empty!")
+
+        self.necessary_print(f"[+] The files listed in the $WORK/include directory are:", kind)
+        self.necessary_print(str(os.listdir(include_dir)), kind)
+
+        lib_dir = os.path.join(work_dir, "lib")
+        if not os.path.exists(lib_dir):
+            raise Exception(f"The $WORK/lib directory does not exist!")
+
+        if not os.listdir(lib_dir):
+            raise Exception(f"The $WORK/lib directory is empty!")
+
+        self.cleanup_lib_dir(lib_dir)
+
+        self.necessary_print(f"[+] The files listed in the $WORK/lib directory are:", kind)
+        self.necessary_print(str(os.listdir(lib_dir)), kind)
+
+        shared_libs = []
+        archive_libs = []
+        for root, _, files in os.walk(lib_dir):
+            for file in files:
+                if file.endswith(".a"):
+                    archive_libs.append(os.path.join(root, file))
+                if file.endswith(".so"):
+                    shared_libs.append(os.path.join(root, file))
+        if not archive_libs:
+            raise Exception(f"[!] There is no archive libraries in the $WORK/lib directory! Please check your build.sh to make sure archive libraries are correctly generated.")
+
+        third_party_libs = ProjectUtils.get_project_3rdparty_libs_from_dir(work_dir)
+        self.necessary_print(f"[+] Third party libraries: {[os.path.basename(lib) for lib in third_party_libs]}", kind)
+
+        self.postprocess_static_libraries(archive_libs, shared_libs, lib_dir, third_party_libs, kind)
+
+        self.check_build(lib_dir, kind)
+
+        end_time = time.time()
+        self.necessary_print(f"[+] Library build with {kind} instrumentation succeeded (Time taken: {end_time - start_time:.2f} seconds)", kind)
+        self.upload_build_artifacts_to_cache(kind)
+
+
+    def extract_bc_alternative(self, static_lib: str):
+        # create temporal directory
+        temp_dir = os.path.join("/tmp", "extract_bc_dir")
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_lib = os.path.join(temp_dir, os.path.basename(static_lib))
+        shutil.copyfile(static_lib, temp_lib)
+
+        # ar x lib
+        cmd = ["ar", "x", temp_lib]
+        output = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, cwd=temp_dir)
+        check_subprocess_output(output)
+
+        # extract bc from shared libraries
+        shared_libs = [file for file in os.listdir(temp_dir) if file.endswith(".o")]
+        bc_files = []
+        for lib in shared_libs:
+            abs_path = os.path.join(temp_dir, lib)
+            cmd = ["extract-bc", abs_path]
+            print_debug(f"[+] Extracting bitcode from {abs_path}")
+            output = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, cwd=temp_dir)
+            check_subprocess_output(output)
+            bc_file = abs_path + ".bc"
+            if not os.path.exists(bc_file):
+                print_debug(f"[!] WARNING: WLLVM bitcode file {bc_file} does not exist.")
+                continue
+            bc_files.append(bc_file)
+        
+        if not bc_files:
+            raise Exception(f"[!] ERROR: No bitcode files found!")
+
+        self.link_bc_files_no_conflict(bc_files, static_lib + ".bc", temp_dir)
+        shutil.rmtree(temp_dir)
+
+    def link_bc_files_no_conflict(self, bc_files: List[str], out_file: str, temp_dir: str):
+        cmd = ["llvm-link", *bc_files, "-o", out_file]
+        output = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, cwd=temp_dir)
+        if output.returncode != 0:
+            out_msg = output.stderr.decode("utf-8")
+            pattern = r"error: Linking globals named '(\w+)': symbol multiply defined!"
+            match = re.search(pattern, out_msg)
+            if match:
+                confict_symbol = match.group(1)
+                bc_files = self.handle_conflict_symbol(confict_symbol, bc_files, temp_dir)
+                self.link_bc_files_no_conflict(bc_files, out_file, temp_dir)
+            else:
+                raise Exception(f"[!] ERROR: Failed to link bitcode files! The error is unknown: {out_msg}")
+    
+    def handle_conflict_symbol(self, confict_symbol: str, bc_files: List[str], temp_dir: str):
+        conflict_files = []
+        patern = rf"[BDGT] {confict_symbol}"
+        print_debug(f"[+] Handling conflict symbol: {confict_symbol}")
+        for bc_file in bc_files:
+            cmd = ["llvm-nm", "-A", bc_file]
+            output = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, cwd=temp_dir)
+            check_subprocess_output(output)
+            dbg_info = output.stdout.decode("utf-8")
+            matches = re.findall(patern, dbg_info)
+            if matches:
+                conflict_files.append(bc_file)
+                print_debug(f"[+] Found conflict symbol {confict_symbol} in {bc_file}")
+        if not conflict_files:
+            raise Exception(f"[!] ERROR: No conflict symbol {confict_symbol} found in the bitcode files! Please check your build script!")
+        conflict_files.sort(key=len)
+        reserved = conflict_files[0]
+        print_debug(f"[+] Reserved bitcode file: {reserved}")
+        for bc_file in conflict_files:
+            if bc_file == reserved:
+                continue
+            bc_files.remove(bc_file)
+            print_debug(f"[+] Removed bitcode file: {bc_file}")
+        return bc_files
+    
+    def build_wllvm(self):
+        self.build_library(CompileKind.WLLVM, WLLVM_FLAGS, WLLVM_FLAGS)
+        work_dir = ProjectUtils.get_build_work_dir(CompileKind.WLLVM)
+
+        static_lib = ProjectUtils.get_project_build_static_lib(work_dir)
+        bc_file = static_lib + ".bc"
+        if not OSSUtils.download_file_from_oss_cache(bc_file, cache_kind=OSSCacheKind.Bitcode):
+            cmd = ["extract-bc", "-b", static_lib]
+            output = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, cwd=os.path.dirname(static_lib))
+            if output.returncode != 0:
+                if output.stdout:
+                    out_msg = output.stdout.decode("utf-8")
+                    if out_msg.find("llvm-link: No such file or directory") != -1:
+                        print("[!] ERROR: Failed to extract bit code files from the temporal build directory. Please don't delete the temporal build directory after library building.")
+                        exit(-1)
+            if os.path.exists(bc_file):
+                OSSUtils.upload_file_to_oss_cache(bc_file, cache_kind=OSSCacheKind.Bitcode)
+
+        if not os.path.exists(bc_file):
+            self.extract_bc_alternative(static_lib)
+            OSSUtils.upload_file_to_oss_cache(bc_file, cache_kind=OSSCacheKind.Bitcode)
+        
+        cg_file = ProjectUtils.get_project_wllvm_callgraph_file()
+        if not OSSUtils.download_file_from_oss_cache(cg_file, cache_kind=OSSCacheKind.Callgraph):
+            cmd = ["opt", "-passes=dot-callgraph", bc_file]
+            print_debug(f"[+] Running command: {cmd}")
+            output = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE, cwd=os.path.dirname(static_lib))
+            check_subprocess_output(output)
+            OSSUtils.upload_file_to_oss_cache(cg_file, cache_kind=OSSCacheKind.Callgraph)
+
+        if not os.path.exists(cg_file):
+            raise Exception("[!] ERROR: Call graph generation failed, please check your build script!")
+        
+        if FUZZAGENT_DEBUG:
+            print("[+] WLLVM build succeeded")
+
+    def check_build(self, lib_dir: str, kind: CompileKind):
+        static_lib = ProjectUtils.get_project_static_lib_from_dir(lib_dir)
+        libs = [static_lib]
+        if kind == CompileKind.Basic:
+            cmd = ["readelf", "-s"]
+            self.necessary_print(f"[+] Check required instrumented symbols in generated artifacts: {BASIC_SYMBOLS}", kind)
+            self.check_library_instrumentation(libs, cmd, BASIC_SYMBOLS)
+        elif kind == CompileKind.Fuzzer:
+            if get_fuzzing_engine() == FuzzingEngine.LibFuzzer:
+                cmd = ["readelf", "-s"]
+                self.necessary_print(f"[+] Check required instrumented symbols in generated artifacts: {SANITIZER_SYMBOLS}", kind)
+                self.check_library_instrumentation(libs, cmd, SANITIZER_SYMBOLS)
+        elif kind == CompileKind.Sanitizer:
+            cmd = ["readelf", "-s"]
+            self.necessary_print(f"[+] Check required instrumented symbols in generated artifacts: {SANITIZER_SYMBOLS}", kind)
+            self.check_library_instrumentation(libs, cmd, SANITIZER_SYMBOLS)
+        elif kind == CompileKind.Coverage:
+            cmd = ["readelf", "-S"]
+            self.necessary_print(f"[+] Check required instrumented sections in generated artifacts: {COVERAGE_SYMBOLS}", kind)
+            self.check_library_instrumentation(libs, cmd, COVERAGE_SYMBOLS)
+        elif kind == CompileKind.SanCov:
+            cmd = ["readelf", "-s"]
+            self.necessary_print(f"[+] Check required instrumented symbols in generated artifacts: {SANCOV_SYMBOLS}", kind)
+            self.check_library_instrumentation(libs, cmd, SANCOV_SYMBOLS)
+        elif kind == CompileKind.WLLVM:
+            return
+        elif kind == CompileKind.CMPLOG:
+            pass # cannot be easily checked by symbols or sections
+        else:
+            raise Exception(f"[!] ERROR: Unsupport compilation kind: {kind}")
+    
+    def check_library_instrumentation(self, libs: List[str], cmd: List[str], find_strs: List[str]):
+        matched_libs = []
+        for lib in libs:
+            this_cmd = cmd.copy()
+            this_cmd.append(lib)
+            output = subprocess.run(this_cmd, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE)
+            check_subprocess_output(output)
+            dbg_info = output.stdout.decode("utf-8", errors="ignore")
+
+            find_str_num = 0
+            for find_str in find_strs:
+                if dbg_info.find(find_str) != -1:
+                    find_str_num += 1
+            if find_str_num == len(find_strs):
+                matched_libs.append(lib)
+        
+        if not matched_libs:
+            raise Exception(f"[!] ERROR: No required symbols/sections found in the shared/archive libraries: {libs}")
+
+        #has_shared = False
+        has_archived = False
+        for file in matched_libs:
+            if file.endswith(".a"):
+                has_archived = True
+            #if file.endswith(".so"):
+            #    has_shared = True
+
+        #if not has_shared:
+        #    raise Exception("[!] ERROR: No required symbols/sections found in your shared libraries!")
+        
+        if not has_archived:
+            raise Exception("[!] ERROR: No required symbols/sections found in your archived libraries!")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        "run_and_check_build_script", usage="run_and_check_build_script <script_dir>"
+    )
+    parser.add_argument("script_path", type=str, help="the path of script path")
+    parser.add_argument("--sanitizer", action="store_true", help="only build the library with sanitizer instrumentation")
+    parser.add_argument("--basic", action="store_true", help="only build the library with basic instrumentation")
+    args = parser.parse_args()
+    script_path = args.script_path
+    builder = LibraryBuilder(script_path)
+    if args.sanitizer:
+        builder.build_library(CompileKind.Sanitizer, SANITIZER_CFLAGS, SANITIZER_CXXFLAGS)
+        exit(0)
+    if args.basic:
+        builder.build_library(CompileKind.Basic, BASIC_CFLAGS, BASIC_CXXFLAGS)
+        exit(0)
+    try:
+        #builder.build_library(CompileKind.Basic, BASIC_CFLAGS, BASIC_CXXFLAGS)
+        builder.build_library(CompileKind.Coverage, COVERAGE_CFLAGS, COVERAGE_CXXFLAGS)
+        builder.build_library(CompileKind.Fuzzer, FUZZER_CFLAGS, FUZZER_CXXFLAGS)
+        builder.build_library(CompileKind.SanCov, SANCOV_CFLAGS, SANCOV_CXXFLAGS)
+        builder.build_library(CompileKind.Sanitizer, SANITIZER_CFLAGS, SANITIZER_CXXFLAGS)
+        builder.build_wllvm()
+        if get_fuzzing_engine() == FuzzingEngine.AFLpp:
+            builder.build_library(CompileKind.CMPLOG, FUZZER_CFLAGS, FUZZER_CXXFLAGS)
+    except Exception as e:
+        tmp_build_script = os.path.join("/tmp", os.path.basename(script_path))
+        if OSSUtils.download_file_from_oss_cache(tmp_build_script, cache_kind=OSSCacheKind.BuildScript):
+            print(f"[!] Detected build failure. Downloaded the build script you previous succeeded from OSS cache for debugging: {tmp_build_script}")
+            print(f"[!] You can check the build script and re-run the builder to debug the build issue.")
+        raise e
+    OSSUtils.upload_file_to_oss_cache(script_path, cache_kind=OSSCacheKind.BuildScript)
+    print("[+] All builds succeeded!")

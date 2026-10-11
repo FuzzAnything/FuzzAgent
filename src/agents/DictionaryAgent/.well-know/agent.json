@@ -1,0 +1,33 @@
+{
+  "name": "DictionaryAgent",
+  "description": "I'm a specialized agent that provide a lean, high-impact fuzzing dictionaries for target projects. I can locate existing resources (e.g., fuzzing dictionary for other projects) from the web and prune them to create a new dictionary for the target project.",
+  "url": "https://localhost",
+  "provider": {
+    "organization": "FuzzAgent",
+    "url": "https://fuzzagent.com"
+  },
+  "version": "1.0.0",
+  "authentication": {
+    "schemes": ["OAuth2"]
+  },
+  "defaultInputModes": ["text/plain"],
+  "defaultOutputModes": ["text/plain"],
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false
+  },
+  "skills": [
+    {
+      "id": "dictionary_acquisition",
+      "name": "Dictionary Acquisition",
+      "description": "Locate existing resources (e.g., fuzzing dictionary for other projects) from the web and prune them",
+      "tags": ["dictionary acquisition", "fuzzing", "optimization"],
+      "examples": [
+        "Search the web for existing fuzzing dictionaries that are useful for the target project",
+        "Download the existing dictionaries using bash commands",
+        "Prune the existing dictionaries to create a new lean, high-impact fuzzing dictionary for the target project"
+      ],
+      "outputModes": ["text/plain"]
+    }
+  ]
+}

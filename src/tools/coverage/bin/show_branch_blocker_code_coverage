@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+import os
+import orjson
+from project_utils import ProjectUtils
+from show_code_coverage import LLVM_COV_JSON_FILE_NAME, SOURCE_COVERAGE_DIR_NAME
+import argparse
+BLOCKER_PAGE_SIZE = 30
+
+class LLVMBranchBlocker:
+    def __init__(self, coverage_dir: str):
+        self.coverage_dir = coverage_dir
+        self.llvm_cov = os.path.join(self.coverage_dir, LLVM_COV_JSON_FILE_NAME)
+        if not os.path.exists(self.llvm_cov):
+            raise Exception(f"[!] Error: {self.llvm_cov} does not exist!")
+        self.llvm_cov_functions = self.load_llvm_cov()
+
+    def load_llvm_cov(self) -> dict:
+        with open(self.llvm_cov, "rb") as f:
+            data = orjson.loads(f.read())
+        functions = data["data"][0]["functions"]
+        return functions
+    
+    def analyze_function_complexity(self) -> list:
+        functions = []
+        for func in self.llvm_cov_functions:
+            count = func["count"]
+            if count < 0:
+                continue
+            branches = func["branches"]
+            complexity = len(branches) * 2
+            undiscovered_complexity = 0
+            for branch in branches:
+                true_branch_cnt = branch[4]
+                flase_branch_cnt = branch[5]
+                if true_branch_cnt > 0:
+                    undiscovered_complexity += 1
+                if flase_branch_cnt > 0:
+                    undiscovered_complexity += 1
+            func["complexity"] = complexity
+            func["undiscovered_complexity"] = undiscovered_complexity
+            functions.append(func)
+        return functions
+    
+    def anaylyze_branch_blockers(self):
+        functions = self.analyze_function_complexity()
+        functions = sorted(functions, key=lambda x: (x["undiscovered_complexity"]), reverse=True)[:BLOCKER_PAGE_SIZE]
+        return functions
+
+    def display_branch_blockers(self):
+        project_name = ProjectUtils.get_project_name()
+        functions = self.anaylyze_branch_blockers()
+        info = ""
+        header = "| Blocked Branch Count | Reachable Branch Count | Blocker Hits | Function Name | Blocked Branch Location (filename: line)|\n"
+        splash = "|:---|:---|:---|:---|:---|\n"
+        info += header + splash
+        for i, func in enumerate(functions):
+            if func["branches"]:
+                branch_location = func["branches"][0][0]
+            else:
+                branch_location = "None"
+            file_name = func["filenames"][0]
+            file_name = file_name[file_name.find(project_name):]
+            file_location = file_name + ".txt:" + str(branch_location)
+            info += f"| {func['undiscovered_complexity']}|{func['complexity']}|{func['count']}|{func['name']}|{file_location}|\n"
+            if i >= BLOCKER_PAGE_SIZE:
+                break
+        print(info)
+        print("TableNotes:")
+        coverage_dir = ProjectUtils.get_project_coverage_dir()
+        source_code_dir = os.path.join(coverage_dir, SOURCE_COVERAGE_DIR_NAME)
+        print(f"- We provide source code with coverage hit counts at each line under the directory {source_code_dir}. This information is helpful for you to understand the root cause of the branch blocker. You can open the source code with coverage hit counts via: `open {source_code_dir}/<file_path> <line_number>`")
+        
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fuzzer_id", type=int, required=False, default=None, help="The fuzzer ID to show branch blocker code coverage for.")
+    args = parser.parse_args()
+    fuzzer_id = args.fuzzer_id
+    if fuzzer_id is not None:
+        coverage_dir = ProjectUtils.get_fuzzer_coverage_dir(fuzzer_id)
+    else:
+        coverage_dir = ProjectUtils.get_project_coverage_dir()
+    llvm_branch_blocker = LLVMBranchBlocker(coverage_dir)
+    llvm_branch_blocker.display_branch_blockers()
+
+  

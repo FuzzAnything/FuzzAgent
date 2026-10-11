@@ -1,0 +1,31 @@
+{
+    "name": "CoverageAnalyzerAgent",
+    "description": "Advanced coverage analysis specialist that performs comprehensive multi-layered coverage diagnosis across Overview, Module, File, API, Function, and Branch levels. Analyzes coverage gaps, identifies bottlenecks, and provides actionable recommendations for improving fuzzing effectiveness on the tasks of harness generation and seed generation.",
+    "url": "https://localhost",
+    "provider": {
+      "organization": "FuzzAgent",
+      "url": "https://fuzzagent.com"
+    },
+    "version": "1.0.0",
+    "authentication": {
+      "schemes": ["OAuth2"]
+    },
+    "defaultInputModes": ["text/plain"],
+    "defaultOutputModes": ["text/plain"],
+    "capabilities": {
+      "streaming": true,
+      "pushNotifications": false
+    },
+    "skills": [
+      {
+        "id": "coverage_analysis",
+        "name": "Coverage Analysis",
+        "description": "Identifies completely uncovered public APIs by analyzing module and file coverage reports. Groups related APIs and recommends the creation of a new fuzzing harness to target them for maximum static coverage gain. Focuses on functions with high undiscovered complexity that have never been reached by any fuzzer.",
+        "tags": ["static analysis", "harness generation", "api coverage", "uncovered functions", "complexity analysis"],
+        "examples": [
+          "Analyze the project's coverage, suggest a harness to achieve the highest coverage gain."
+        ],
+        "outputModes": ["text/plain"]
+      }
+    ]
+}

@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import shutil
+import subprocess
+from typing import List
+from project_utils import ProjectUtils, CompileKind
+from harnessreducer.api import process
+
+def list_archive_libraries(lib_dir: str) -> List[str]:
+    archive_libraries = []
+    for file in os.listdir(lib_dir):
+        if file.endswith(".a"):
+            lib_file = os.path.join(lib_dir, file)
+            archive_libraries.append(lib_file)
+    return archive_libraries
+
+def get_compilation_flags(extra_flags: str) -> list[str]:
+    flags = [
+        f"-I{ProjectUtils.get_project_header_include_dir()}"
+         f"-I{ProjectUtils.get_project_3rdparty_include_dir(ProjectUtils.get_build_work_dir(CompileKind.Sanitizer))}",]
+    lib_dir = os.path.join(ProjectUtils.get_build_work_dir(CompileKind.Sanitizer), "lib")
+    static_lib_files = list_archive_libraries(lib_dir)
+    flags.append("-Wl,--start-group")
+    for lib in static_lib_files:
+        flags.append(lib)
+    
+    third_party_libs = ProjectUtils.get_project_3rdparty_libs_from_dir(ProjectUtils.get_build_work_dir(CompileKind.Sanitizer))
+    for third_party_lib in third_party_libs:
+        flags.append(third_party_lib)
+    
+    # Add zlib and math library linking flags for libpng after static libraries
+    if extra_flags.strip():
+        flags.extend(extra_flags.strip().split())
+    flags.append("-Wl,--end-group")
+    return flags
+
+def load_extra_flags(harness_id: int) -> str:
+    cache_output_dir = ProjectUtils.get_cache_fuzzer_dir(harness_id)
+    extra_flags_file = os.path.join(cache_output_dir, "extra_flags.txt")
+    if os.path.exists(extra_flags_file):
+        with open(extra_flags_file, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    return ""
+
+def find_crash_artifact(fuzzer_id: int) -> str | None:
+    crash_dir = ProjectUtils.get_fuzzer_crash_dir(fuzzer_id)
+    if not os.path.exists(crash_dir):
+        return None
+    for entry in os.listdir(crash_dir):
+        if entry.startswith("crash-"):
+            return os.path.join(crash_dir, entry)
+    return None
+
+def compile_reduced_harness(reduced_harness_path: str, fuzzer_id: int, compilation_flags: list[str]):
+    fuzzer = ProjectUtils.get_fuzzer_binary_by_id(fuzzer_id)
+    compile_cmd = [
+        "clang++",
+        "-fsanitize=address,undefined",
+        "-g",
+        "-O0",
+        "-fstandalone-debug",
+        "-fsanitize=fuzzer",
+        reduced_harness_path,
+        "-o",
+        fuzzer,
+    ]
+    compile_cmd.extend(compilation_flags)
+
+    output = subprocess.run(compile_cmd, stderr=subprocess.PIPE)
+    if output.returncode != 0:
+        err_msg = output.stderr.decode("utf-8", errors="ignore")
+        raise Exception(
+            f"[!] Error: Failed to compile reduced harness {reduced_harness_path}!\n {err_msg}\n"
+        )
+    poc = os.path.join(os.path.dirname(fuzzer), "poc")
+    shutil.copy2(fuzzer, poc)
+    print(f"[+] Compilation of reduced harness completed. You can now run the fuzzer ({fuzzer}) and poc ({poc}) to reproduce the crash.")
+
+
+def minimizer(fuzzer_id: int, keep_work_dir: bool):
+    extra_flags = load_extra_flags(fuzzer_id)
+    compilation_flags = get_compilation_flags(extra_flags)
+    print(f"[+] Loaded extra flags for harness {fuzzer_id}: {compilation_flags}")
+    fuzzer_dir = ProjectUtils.get_fuzzer_dir_by_id(fuzzer_id)
+    if not os.path.exists(fuzzer_dir):
+        raise Exception(f"[!] Error: Harness binary not found at {fuzzer_dir}!")
+    harness_path = ProjectUtils.get_harness_path_by_id(fuzzer_id)
+    reduced_harness_path = os.path.join(fuzzer_dir, "poc.cpp")
+    shutil.copy2(harness_path, reduced_harness_path)
+
+    
+    crash_input_file = find_crash_artifact(fuzzer_id)
+    if not crash_input_file:
+        print(f"[!] Warning: Timeout crash cannot be minimized. Please proceed without minimization.")
+        exit(0)
+
+    reduction_result = process(
+        harness_path=harness_path,
+        extra_flags=" ".join(compilation_flags),
+        crash_input=crash_input_file,
+        work_dir=None if not keep_work_dir else os.path.join(ProjectUtils.get_fuzzer_dir_by_id(fuzzer_id), "reduction_work_dir"),
+        use_llm=False,
+    )
+    if not reduction_result:
+        print(f"[!] Warning: Harness reduction failed. Please proceed with the original harness at {harness_path}")
+        exit(0)
+    shutil.copy2(reduction_result, reduced_harness_path)
+    print(f"[+] Reduction completed. Please proceed your analysis with the reduced harness at: {reduced_harness_path}")
+    compile_reduced_harness(reduced_harness_path, fuzzer_id, compilation_flags)
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Harness Minimizer with retained crash behavior")
+    parser.add_argument("fuzzer_id", type=int, help="The harness (or fuzzer) instance ID to generate minimized harness for.")
+    parser.add_argument("-w", "--work-dir", action="store_true", help="Reserve the working directory after reduction for debugging purposes.")
+    args = parser.parse_args()
+    minimizer(args.fuzzer_id, args.work_dir)
+

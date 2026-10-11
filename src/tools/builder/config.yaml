@@ -1,0 +1,10 @@
+tools:
+  run_and_check_build_script:
+    timeout: 7200
+    signature: run_and_check_build_script <script_path>
+    docstring: "Run the build script and verify the correct generation of build artifacts. This tool: 1. Automatically exports required environment variables (CC, CXX, CFLAGS, CXXFLAGS, WORK) to the build script's context. 2. Executes the build script to generate building artifacts with three kinds of instrumentation: LibFuzzer Engine (stored in 'basic/' subdirectory), Sanitizers (stored in 'sanitizer/' subdirectory) and Code coverage  (stored in 'coverage/' subdirectory)."
+    arguments:
+      - name: script_path
+        type: string
+        description: the path of the build script
+        required: true

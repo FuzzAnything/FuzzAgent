@@ -1,0 +1,27 @@
+tools:
+  validate_dictionary_file:
+    signature: validate_dictionary_file "<dictionary_file>"
+    docstring: Validate whether the format of the dictionary file is legal.
+    arguments:
+      - name: dictionary_file
+        type: string
+        description: The path of dictionary file you want to validate.
+        required: true
+  track_web_retrieve_progress:
+    signature: track_web_retrieve_progress "<task_kind>" "<action>" "<project_names>"
+    docstring: Record and track the web retrieve progress for the given task kind and project names. 
+    arguments:
+      - name: task_kind
+        type: string
+        enum: ["dictionary", "seed"]
+        description: The task kind to track the web retrieve progress.
+        required: true
+      - name: action
+        type: string
+        enum: ["record_tasks", "complete_tasks"]
+        description: The action to track the web retrieve progress.
+        required: true
+      - name: project_names
+        type: string
+        description: The project names to track the web retrieve progress. Use comma to separate multiple project names.
+        required: true

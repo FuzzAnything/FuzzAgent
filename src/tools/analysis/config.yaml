@@ -1,0 +1,96 @@
+tools:
+  observe_current_states:
+    timeout: 120
+    signature: observe_current_states
+    docstring: Check and observe the status of the whole fuzzing tasks, including
+      build status, harness status, dictionary status, fuzzing status, and any issues
+      in the progress of fuzzing. Please feel free to use this tool to check the status
+      of the whole fuzzing tasks. However, please note that the output of this tool
+      is only a status of the system and does not constitute a guide for actual operation.
+      You still need to decide what to do next based on the process you have executed,
+      the feedback you received, and the actual situation of your current working
+      directory.
+  harness_minimizer:
+    timeout: 1200
+    signature: harness_minimizer <fuzzer_id>
+    docstring: Minimize the harness code while retaining the crash-triggering behavior.
+      The minimized harness will be compiled into a new fuzzer binary for you to further
+      analyze the crash.
+    arguments:
+    - name: fuzzer_id
+      type: integer
+      description: The fuzzer (or harness) instance ID to generate minimized harness
+        for.
+      required: true
+  crash_artifact_analysis:
+    timeout: 60
+    signature: crash_artifact_analysis <fuzzer_id> <crash_artifact_path>
+    docstring: Execute the crash artifact on the fuzzer binary and gather information
+      from the crash stacktrace and source code.
+    arguments:
+    - name: fuzzer_id
+      type: integer
+      description: The fuzzer instance ID to generate the crash report for. E.g.,
+        000, 001, etc.
+      required: true
+    - name: crash_artifact_path
+      type: string
+      description: Path to the artifact file that caused the crash artifact, which
+        is usually named as "crash-<hash>", must be a file, not a directory
+      required: true
+  crash_debugger:
+    timeout: 120
+    signature: crash_debugger <fuzz_target_binary> <crash_artifact_path> <gdb_commands>
+      [--reset <0|1>]
+    docstring: Run a stateful GDB session on the fuzzer binary to debug a crash. The
+      tool automatically maintains your previous GDB commands. You can pass multiple
+      comma-separated commands at once (e.g., "b LLVMFuzzerTestOneInput, r, p var"). To reset the session
+      history, pass --reset 1.
+    arguments:
+    - name: fuzz_target_binary
+      type: string
+      description: Path to the fuzzer binary.
+      required: true
+    - name: crash_artifact_path
+      type: string
+      description: Path to the crash artifact file that caused the crash
+      required: true
+    - name: gdb_commands
+      type: string
+      description: The new GDB commands to append & run, comma-separated. The target
+        binary takes the crash_artifact_path as an argument automatically.
+      required: true
+    - name: reset
+      type: integer
+      description: Pass 1 to clear the session history before executing the new commands,
+        0 otherwise. Default is 0.
+      required: false
+  generate_crash_report:
+    timeout: 10
+    signature: generate_crash_report "<fuzzer_id>" "<crash_artifact_path>" "<triage>"
+      "<content>"
+    docstring: 'Create a normalized crash report file for a given fuzzer and crash
+      input.'
+    arguments:
+    - name: fuzzer_id
+      type: string
+      description: The fuzzer instance ID to generate the crash report for. E.g.,
+        000, 001, etc.
+      required: true
+    - name: crash_artifact_path
+      type: string
+      description: Path to the crash artifact file that caused the crash, which is
+        usually named as "crash-<hash>", must be a file, not a directory
+      required: true
+    - name: triage
+      type: string
+      enum:
+        - library-bug
+        - harness-bug
+      description: The triage result of the crash, e.g., "library-bug", "harness-bug"
+      required: true
+    - name: content
+      type: string
+      description: Report content as a string. Provide the full markdown format text.
+      required: true
+      redirect: true

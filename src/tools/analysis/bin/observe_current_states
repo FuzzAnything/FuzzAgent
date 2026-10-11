@@ -1,0 +1,472 @@
+#!/usr/bin/env python3
+
+import os
+import json
+import subprocess
+import shutil
+from typing import List
+import sys
+from project_utils import DEFAULT_DICTIONARY_FILE, FuzzerExecutionState, FuzzingEngine, ProjectUtils, BASIC_SYMBOLS, SANITIZER_SYMBOLS, COVERAGE_SYMBOLS, get_fuzzing_engine
+from enum import Enum
+
+#FUZZER_SYMBOLS = ["__sancov_lowest_stack"]
+#SANITIZER_SYMBOLS = ["__sancov_lowest_stack", "__asan_init"]
+#COVERAGE_SECTIONS = ["__llvm_covmap"]
+
+
+class Status(Enum):
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+    RUNNING = "RUNNING"
+    PENDING = "PENDING"
+    CANCELLED = "CANCELLED"
+    TIMEOUT = "TIMEOUT"
+    ERROR = "ERROR"
+    WARNING = "WARNING"
+    INFO = "INFO"
+
+
+class TaskEntry:
+    def __init__(self, task_name: str, status: Status, details: str):
+        self.task_name = task_name
+        self.status = status
+        self.details = details
+
+    def set_status(self, status: Status):
+        self.status = status
+
+    def set_details(self, details: str):
+        self.details = details
+
+    
+    def to_dict(self):
+        return {
+            "task_name": self.task_name,
+            # 将 Enum 转换为其值 (字符串)
+            "status": self.status.value,
+            "details": self.details,
+        }
+    
+
+
+class TaskQueue:
+    def __init__(self):
+        self.main_task = None
+        self.overall_status = None
+        self.summary = None
+        self.sub_tasks = []
+
+    def set_main_task(self, task_name: str):
+        self.main_task = task_name
+
+    def set_overall_status(self, status: Status):
+        self.overall_status = status
+
+    def set_summary(self, summary: str):
+        self.summary = summary
+
+    def add_sub_task(self, task_entry: TaskEntry):
+        self.sub_tasks.append(task_entry)
+    
+    def to_dict(self):
+        return {
+            "main_task": self.main_task,
+            # 处理可能的 None 或 Enum
+            "overall_status": self.overall_status.value if self.overall_status else None,
+            "summary": self.summary,
+            # 递归调用嵌套 TaskEntry 对象的 to_dict 方法
+            "sub_tasks": [task.to_dict() for task in self.sub_tasks]
+        }
+
+
+TASKs = TaskQueue()
+
+
+def check_directory() -> bool:
+    """Check if the project directory exists and is properly structured."""
+    project_dir = ProjectUtils.get_project_root_dir()
+    if not os.path.exists(project_dir):
+        task_entry = TaskEntry("Check Output Directory Structures", Status.FAILED, f"The output directory of the project is not found: {project_dir}")
+        TASKs.add_sub_task(task_entry)
+        return False
+    entities = os.listdir(project_dir)
+    available_entries = [".cache", ".vms", ".git", ".gitignore", "build", "crash_reports", "crashes", "dictionary", "seeds", "fuzzers", "harnesses", "coverage_guidance"]
+    for entity in entities:
+        if entity not in available_entries:
+            task_entry = TaskEntry("Check Output Directory Structures", Status.FAILED, f"Unknown entity detected in the $OUTPUT directory: `{entity}`. Please don't corrupt the directory structure. The available entities are: {available_entries}.")
+            TASKs.add_sub_task(task_entry)
+            return False
+    task_entry = TaskEntry("Check Output Directory Structures", Status.SUCCESS, "The $OUTPUT directory of the project is properly structured")
+    TASKs.add_sub_task(task_entry)
+    return True
+
+def check_building_artifacts(build_dir: str, artifact_type: str) -> bool:
+    work_dir = os.path.join(build_dir, artifact_type)
+    if not os.path.exists(work_dir):
+        task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"Library artifacts with {artifact_type} fuzzer instrumentation are not found. They should be located in the directory: {work_dir}")
+        TASKs.add_sub_task(task_entry)
+        return False
+
+    include_dir = os.path.join(work_dir, "include")
+    if not os.path.exists(include_dir):
+        task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"The include directory is not found: {include_dir}. Please check the build script and make sure the headers are properly placed in the include directory.")
+        TASKs.add_sub_task(task_entry)
+        return False
+
+    if not os.listdir(include_dir):
+        task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"The include directory is empty: {include_dir}. Please check the build script and make sure the headers are properly placed in the include directory.")
+        TASKs.add_sub_task(task_entry)
+        return False
+
+    lib_dir = os.path.join(work_dir, "lib")
+    if not os.path.exists(lib_dir):
+        task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"The lib directory is not found: {lib_dir}. Please check the build script and make sure the built libraries are properly placed in the lib directory.")
+        TASKs.add_sub_task(task_entry)
+        return False
+
+    if not os.listdir(lib_dir):
+        task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"The lib directory is empty: {lib_dir}. Please check the build script and make sure the built libraries are properly placed in the lib directory.")
+        TASKs.add_sub_task(task_entry)
+        return False
+
+    #has_shared = False
+    has_archived = False
+    for file in os.listdir(lib_dir):
+        if file.endswith(".a"):
+            has_archived = True
+        #if file.endswith(".so"):
+        #    has_shared = True
+    #if not has_shared:
+    #    task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"No shared libraries found in the lib directory: {lib_dir}. Please check the build script and make sure the built shared libraries are properly placed in the lib directory.")
+    #    TASKs.add_sub_task(task_entry)
+    #    return False
+
+    if not has_archived:
+        task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"No archive libraries found in the lib directory: {lib_dir}. Please check the build script and make sure the built archive libraries are properly placed in the lib directory.")
+        TASKs.add_sub_task(task_entry)
+        return False
+
+    return check_build_lib_dir(lib_dir, artifact_type)
+
+
+def check_build_lib_dir(lib_dir: str, kind: str) -> bool:
+    libs = []
+    static_lib = ProjectUtils.get_project_static_lib_from_dir(lib_dir)
+    #shared_lib = ProjectUtils.get_project_shared_lib_from_dir(lib_dir)
+    libs = [static_lib]
+    if kind == "basic":
+        cmd = ["readelf", "-s"]
+        return check_library_instrumentation(libs, cmd, BASIC_SYMBOLS)
+    elif kind == "sanitizer":
+        cmd = ["readelf", "-s"]
+        return check_library_instrumentation(libs, cmd, SANITIZER_SYMBOLS)
+    elif kind == "coverage":
+        cmd = ["readelf", "-S"]
+        return check_library_instrumentation(libs, cmd, COVERAGE_SYMBOLS)
+    elif kind == "fuzzer":
+        if get_fuzzing_engine() == FuzzingEngine.LibFuzzer:
+            cmd = ["readelf", "-s"]
+            return check_library_instrumentation(libs, cmd, SANITIZER_SYMBOLS)
+        return True
+    return False
+
+
+def check_library_instrumentation(
+    libs: List[str], cmd: List[str], find_strs: List[str]
+) -> bool:
+    matched_libs = []
+    for lib in libs:
+        current_cmd = cmd + [lib]
+        output = subprocess.run(
+            current_cmd,
+            stdout=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if output.returncode != 0:
+            err = output.stderr.decode("utf-8", errors="ignore")
+            task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"Checking the instrumentation symbols {find_strs} in {libs} failed. The error message is: {err}")
+            TASKs.add_sub_task(task_entry)
+            return False
+        dbg_info = output.stdout.decode("utf-8", errors="ignore")
+
+        find_str_num = 0
+        for find_str in find_strs:
+            if dbg_info.find(find_str) != -1:
+                find_str_num += 1
+        if find_str_num == len(find_strs):
+            matched_libs.append(lib)
+
+    if not matched_libs:
+        task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"No required {find_strs} symbols/sections found in {libs}!")
+        TASKs.add_sub_task(task_entry)
+        return False
+
+    #has_shared = False
+    has_archived = False
+    for file in matched_libs:
+        if file.endswith(".a"):
+            has_archived = True
+        #if file.endswith(".so"):
+        #    has_shared = True
+
+    #if not has_shared:
+    #    task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"No required {find_strs} symbols/sections found in shared libraries!")
+    #    TASKs.add_sub_task(task_entry)
+    #    return False
+
+    if not has_archived:
+        task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"No required {find_strs} symbols/sections found in archive libraries!")
+        TASKs.add_sub_task(task_entry)
+        return False
+    return True
+
+def check_build_directory() -> bool:
+    """Check if the build directory exists and is properly structured."""
+    build_dir = ProjectUtils.get_project_build_dir()
+    if not os.path.exists(build_dir):
+        task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"The build directory is not found: {build_dir}. Please generate the build script and try again.")
+        TASKs.add_sub_task(task_entry)
+        return False
+    entities = os.listdir(build_dir)
+    available_entries = ["basic", "fuzzer", "sanitizer", "coverage", "build.sh"]
+    for entity in entities:
+        if entity not in available_entries:
+            task_entry = TaskEntry("Check Building Artifacts", Status.FAILED, f"Unknown entity detected in the build directory: {entity}. The available entities are: {available_entries}")
+            TASKs.add_sub_task(task_entry)
+            return False
+    return True
+
+def check_build() -> bool:
+    """Check if the project is properly built with all required artifacts."""
+    build_dir = ProjectUtils.get_project_build_dir()
+
+    build_script = os.path.join(build_dir, "build.sh")
+    if not os.path.exists(build_script):
+        task_entry = TaskEntry("Check Building Artifacts", Status.PENDING, f"The build script is not found in the build directory: {build_script}. Please generate the build script and build the library first.")
+        TASKs.add_sub_task(task_entry)
+        return False
+
+    if not check_building_artifacts(build_dir, "fuzzer"):
+        task_entry = TaskEntry("Check Building Artifacts", Status.ERROR, "Check the building artifacts for {type} instrumentation failed. Please fix the errors in the build script and execute it again.".format(type="fuzzer"))
+        TASKs.add_sub_task(task_entry)
+        return False
+    if not check_building_artifacts(build_dir, "sanitizer"):
+        task_entry = TaskEntry("Check Building Artifacts", Status.ERROR, "Check the building artifacts for {type} instrumentation failed. Please fix the errors in the build script and execute it again.".format(type="sanitizer"))
+        TASKs.add_sub_task(task_entry)
+        return False
+    if not check_building_artifacts(build_dir, "coverage"):
+        task_entry = TaskEntry("Check Building Artifacts", Status.ERROR, "Check the building artifacts for {type} instrumentation failed. Please fix the errors in the build script and execute it again.".format(type="coverage"))
+        TASKs.add_sub_task(task_entry)
+        return False
+    if not check_build_directory():
+        task_entry = TaskEntry("Check Building Artifacts", Status.ERROR, "Check the build directory structures failed. Please fix the errors in the build script and execute it again.")
+        TASKs.add_sub_task(task_entry)
+        return False
+    task_entry = TaskEntry("Check Building Artifacts", Status.SUCCESS, f"The project is properly built with all required artifacts at: {build_dir}.")
+    TASKs.add_sub_task(task_entry)
+    return True  
+
+
+def check_dictionary() -> bool:
+    """Check if fuzzing dictionary files exist and are valid."""
+    dictionary_dir = ProjectUtils.get_project_dictionary_dir()
+
+    dictionary_files = [f for f in os.listdir(dictionary_dir)]
+    if not dictionary_files:
+        task_entry = TaskEntry("Check Dictionary", Status.PENDING, f"The dictionary directory is empty: {dictionary_dir}. Please generate the dictionary file and try again.")
+        TASKs.add_sub_task(task_entry)
+        return False
+    
+    if len(dictionary_files) != 1:
+        task_entry = TaskEntry("Check Dictionary", Status.ERROR, f"More than one files found in the dictionary directory: {dictionary_dir}. Only one dictionary file is expected.")
+        TASKs.add_sub_task(task_entry)
+        return False
+    dictionary_file = os.path.join(dictionary_dir, DEFAULT_DICTIONARY_FILE)
+    if not os.path.exists(dictionary_file):
+        task_entry = TaskEntry("Check Dictionary", Status.ERROR, f"The dictionary file is not found: {dictionary_file}. Please generate the dictionary file and try again.")
+        TASKs.add_sub_task(task_entry)
+        return False
+    task_entry = TaskEntry("Check Dictionary", Status.SUCCESS, f"The dictionary files are properly found in the dictionary directory: {dictionary_dir}.")
+    TASKs.add_sub_task(task_entry)
+    return True
+
+def check_seed() -> bool:
+    """Check if seed corpus files exist and are valid."""
+    seed_dir = ProjectUtils.get_project_seed_dir()
+    if not os.path.exists(seed_dir):
+        task_entry = TaskEntry("Check Seed", Status.PENDING, f"The seed directory is not found: {seed_dir}. Please generate the seed corpus and try again.")
+        TASKs.add_sub_task(task_entry)
+        return False
+    if not os.listdir(seed_dir):
+        task_entry = TaskEntry("Check Seed", Status.PENDING, f"The seed directory is empty: {seed_dir}. Please generate the seed corpus and try again.")
+        TASKs.add_sub_task(task_entry)
+        return False
+    task_entry = TaskEntry("Check Seed", Status.SUCCESS, f"The seed corpus files are properly found in the seed directory: {seed_dir}.")
+    TASKs.add_sub_task(task_entry)
+    return True
+
+def check_harness_entry(entry: str) -> bool:
+    """Check if the harness entry is valid."""
+    if not entry.startswith("harness_") or not entry.endswith(".cpp"):
+        return False
+    entry = entry[8:-4]
+    if len(entry) != 3:
+        return False
+    if not entry.isdigit():
+        return False
+    return True
+    
+
+def delete_entry(entry: str):
+    if os.path.isdir(entry):
+        shutil.rmtree(entry)
+    elif os.path.isfile(entry):
+        os.remove(entry)
+
+def check_harness() -> bool:
+    """Check if harness files exist and are properly compiled."""
+    harness_dir = ProjectUtils.get_project_harnesses_dir()
+
+    harness_files = os.listdir(harness_dir)
+    if not harness_files:
+        task_entry = TaskEntry("Check Harness", Status.PENDING, f"The harness directory is empty: {harness_dir}. Please generate the harness files and try again.")
+        TASKs.add_sub_task(task_entry)
+        return False
+
+    # Check harness naming convention and ordering
+    harness_files.sort()  # Sort files to check ordering
+
+    # Check for gaps in harness numbering
+    for i, entry in enumerate(harness_files):
+        if not check_harness_entry(entry):
+            task_entry = TaskEntry("Check Harness", Status.ERROR, f"Invalid harness file: {entry} (deleted!). The valid harness file format is harness_XXX.cpp, where XXX is a three-digit ordered number.")
+            TASKs.add_sub_task(task_entry)
+            delete_entry(os.path.join(harness_dir, entry))
+            return False
+        expected = f"harness_{i:03d}.cpp"
+        if harness_files[i] != expected:
+            task_entry = TaskEntry("Check Harness", Status.ERROR, f"Invalid harness file ordering. Expected {expected} but found {harness_files[i]}. Please check the harness file ordering.")
+            TASKs.add_sub_task(task_entry)
+            return False
+    task_entry = TaskEntry("Check Harness", Status.SUCCESS, f"All harness files are properly ordered in the harness directory: {harness_dir}. The number of harness files is {len(harness_files)}.")
+    TASKs.add_sub_task(task_entry)
+    return True
+
+def check_fuzzer_entry(entry: str) -> bool:
+    if not entry.startswith("fuzzer_"):
+        return False
+    entry = entry[7:]
+    if len(entry) != 3:
+        return False
+    if not entry.isdigit():
+        return False
+    return True
+
+def check_fuzzer() -> bool:
+    """Check if fuzzers are running and their status."""
+    fuzzers_dir = ProjectUtils.get_project_fuzzers_dir()
+
+    fuzzers = os.listdir(fuzzers_dir)
+    if not fuzzers:
+        task_entry = TaskEntry("Check Fuzzers", Status.PENDING, f"The fuzzer directory is empty: {fuzzers_dir}. Please compile the fuzzers and try again.")
+        TASKs.add_sub_task(task_entry)
+        return False
+
+
+    for file in os.listdir(fuzzers_dir):
+        if not check_fuzzer_entry(file):
+            task_entry = TaskEntry("Check Fuzzers", Status.ERROR, f"Invalid fuzzer entry: {file}. The valid fuzzer directory format is fuzzer_XXX, where XXX is a three-digit ordered number. The invalid fuzzer entry is deleted.")
+            TASKs.add_sub_task(task_entry)
+            delete_entry(os.path.join(fuzzers_dir, file))
+            return False
+
+    for i, fuzzer in enumerate(fuzzers):
+        expected = f"fuzzer_{i:03d}"
+        if fuzzer != expected:
+            task_entry = TaskEntry("Check Fuzzers", Status.ERROR, f"Invalid fuzzer ordering. Expected {expected} but found {fuzzer}. Please check the fuzzers ordering.")
+            TASKs.add_sub_task(task_entry)
+            return False
+
+        fuzzer_id = ProjectUtils.get_fuzzer_id_from_path(fuzzer)
+        
+        sanitizer_fuzzer_path = ProjectUtils.get_fuzzer_binary_by_id(fuzzer_id, check_exist=False)
+        if not os.path.exists(sanitizer_fuzzer_path):
+            task_entry = TaskEntry("Check Fuzzers", Status.ERROR, f"The fuzzer binary with sanitizer instrumentation was not found at: {sanitizer_fuzzer_path}. Please check the corresponding harness and recompile it.")
+            TASKs.add_sub_task(task_entry)
+            return False
+
+        cov_fuzzer_path = ProjectUtils.get_fuzzer_coverage_binary_by_id(fuzzer_id, check_exist=False)
+        if not os.path.exists(cov_fuzzer_path):
+            task_entry = TaskEntry("Check Fuzzers", Status.ERROR, f"The fuzzer binary with coverage instrumentation was not found at: {cov_fuzzer_path}.  Please check the corresponding harness and recompile it.")
+            TASKs.add_sub_task(task_entry)
+            return False
+
+        # Check if fuzzer seeds exist
+        fuzz_profile = ProjectUtils.get_fuzzer_profile()
+        fuzzer_info = fuzz_profile.fuzzers.get(fuzzer_id)
+        if fuzzer_info is None:
+            task_entry = TaskEntry("Check Fuzzers", Status.ERROR, f"The fuzzer {fuzzer_id:03d} is not compiled by the designated tool `compile_and_check_harness`. Please report this issue and compile it again.")
+            TASKs.add_sub_task(task_entry)
+            return False
+        if fuzzer_info.state == FuzzerExecutionState.NOT_EXECUTED:
+            task_entry = TaskEntry("Check Fuzzers", Status.PENDING, f"The fuzzer {fuzzer_id:03d} has not been executed. Please execute the fuzzer and try again.")
+            TASKs.add_sub_task(task_entry)
+            return False
+        if fuzzer_info.state == FuzzerExecutionState.CRASHED:
+            task_entry = TaskEntry("Check Fuzzers", Status.PENDING, f"The fuzzer {fuzzer_id:03d} crashed during the last execution. Please analyze the crashes.")
+            TASKs.add_sub_task(task_entry)
+            return False
+        if fuzzer_info.state == FuzzerExecutionState.HARNESS_BUG:
+            task_entry = TaskEntry("Check Fuzzers", Status.PENDING, f"The fuzzer {fuzzer_id:03d} found a harness bug during the last execution. Please fix the harness bug.")
+            TASKs.add_sub_task(task_entry)
+            return False
+        if fuzzer_info.state == FuzzerExecutionState.LIBRARY_BUG:
+            task_entry = TaskEntry("Check Fuzzers", Status.SUCCESS, f"The fuzzer {fuzzer_id:03d} found a library bug. The fuzzer and bugs are properly archived.")
+            TASKs.add_sub_task(task_entry)
+        if fuzzer_info.state == FuzzerExecutionState.PLATEAU:
+            task_entry = TaskEntry("Check Fuzzers", Status.SUCCESS, f"The fuzzing for fuzzer {fuzzer_id:03d} is completed and the code coverage reached saturation.")
+            TASKs.add_sub_task(task_entry)
+        if fuzzer_info.state == FuzzerExecutionState.FIXED:
+            task_entry = TaskEntry("Check Fuzzers", Status.PENDING, f"The harness errors in fuzzer {fuzzer_id:03d} are fixed. Please execute the fuzzer and try again.")
+            TASKs.add_sub_task(task_entry)
+            return False
+
+    task_entry = TaskEntry("Check Fuzzers", Status.SUCCESS, f"All generated fuzzers are properly processed and arranged in the fuzzers directory. The number of fuzzers is {len(fuzzers)}. Please plan your tasks to generate the subsequent fuzzers.")
+    TASKs.add_sub_task(task_entry)
+    return True
+
+def check_coverage_guidance() -> bool:
+    """Check if the coverage guidance files exist and are valid."""
+    if os.environ.get("DISABLE_COVERAGE_GUIDANCE"):
+        return True
+    coverage_guidance_dir = ProjectUtils.get_project_coverage_guidance_dir()
+    if not os.path.exists(coverage_guidance_dir):
+        task_entry = TaskEntry("Check Coverage Guidance", Status.PENDING, f"The coverage guidance directory is not found: {coverage_guidance_dir}. Please generate the coverage guidance files and try again.")
+        TASKs.add_sub_task(task_entry)
+        return False
+    all_harnesses = ProjectUtils.list_all_harnesses()
+    next_harness_id = len(all_harnesses)
+    next_guidance_file = os.path.join(coverage_guidance_dir, f"harness_{next_harness_id:03d}_guidance.md")
+    if not os.path.exists(next_guidance_file):
+        task_entry = TaskEntry("Check Coverage Guidance", Status.PENDING, f"The coverage guidance file for the next harness is not found: {next_guidance_file}. Please generate the coverage guidance file and try again.")
+        TASKs.add_sub_task(task_entry)
+        return False
+    task_entry = TaskEntry("Check Coverage Guidance", Status.SUCCESS, f"The coverage guidance file for the next harness is properly found in the coverage guidance directory: {coverage_guidance_dir}. The next harness ID is {next_harness_id}.")
+    TASKs.add_sub_task(task_entry)
+    return True
+
+
+if __name__ == "__main__":
+    print("[*] Observing the whole fuzzing tasks status...")
+    TASKs.set_main_task("Whole Library Fuzzing Task Supervision")
+    success = check_directory() and check_build() and check_dictionary() and check_seed() and check_harness() and check_fuzzer() and check_coverage_guidance()
+    if not success:
+        TASKs.set_overall_status(Status.PENDING)
+        TASKs.set_summary("Some fuzzing tasks are not completed or running properly. Please complete or fix them and try again.")
+    else:
+        TASKs.set_overall_status(Status.RUNNING)
+        TASKs.set_summary("All previous fuzzing tasks are finished. Please plan you next task according to the current states.")
+    json_dict = TASKs.to_dict()
+    json_string = json.dumps(json_dict, indent=4, ensure_ascii=False)
+    print(json_string)

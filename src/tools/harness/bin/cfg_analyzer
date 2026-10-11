@@ -1,0 +1,88 @@
+#!/usr/bin/env python3
+
+# FIXME: This script is not used in the current project, and can not correctly run.
+
+from tree_climber.cfg_parser import CFGParser
+import argparse
+
+class CFGAnalyzer:
+    def __init__(self, harness_path: str):
+        self.harness_path = harness_path
+        self.cfg = CFGParser.parse(harness_path)
+
+    def traverse_api_traces(self):
+        cfg = self.cfg
+        # Store API call sequences for all paths
+        api_traces = []
+
+        # Get all nodes
+        nodes = list(cfg.nodes())
+        if not nodes:
+            return api_traces
+
+        # Find entry nodes (nodes with in-degree 0)
+        entry_nodes = [n for n in nodes if cfg.in_degree(n) == 0]
+        if not entry_nodes:
+            # If no node with in-degree 0, use the first node as entry
+            entry_nodes = [nodes[0]]
+
+        # Find exit nodes (nodes with out-degree 0)
+        exit_nodes = [n for n in nodes if cfg.out_degree(n) == 0]
+        if not exit_nodes:
+            # If no node with out-degree 0, use the last node as exit
+            exit_nodes = [nodes[-1]]
+
+        def dfs_traverse(current_node, current_path, visited, current_api_sequence):
+            """Depth-first search traversal of CFG to collect API call sequences"""
+            if current_node in visited:
+                return
+
+            visited.add(current_node)
+            current_path.append(current_node)
+
+            # Check if current node contains API calls
+            node_data = cfg.nodes[current_node]
+            if 'text' in node_data:
+                text = node_data['text']
+                # Check for common API call patterns
+                if any(api in text for api in ['cJSON_', 'malloc', 'free', 'memcpy']):
+                    current_api_sequence.append(text.strip())
+
+            # If reached exit node, save the API sequence for the current path
+            if current_node in exit_nodes:
+                if current_api_sequence:
+                    api_traces.append(current_api_sequence.copy())
+
+            # Continue traversing successor nodes
+            for successor in cfg.successors(current_node):
+                dfs_traverse(successor, current_path, visited.copy(), current_api_sequence.copy())
+
+            current_path.pop()
+
+        # Start traversal from each entry node
+        for entry_node in entry_nodes:
+            dfs_traverse(entry_node, [], set(), [])
+        
+        # Print the collected API traces
+        print(f"Found {len(api_traces)} API call traces:")
+        for i, trace in enumerate(api_traces):
+            print(f"Trace {i+1}:")
+            for j, api_call in enumerate(trace):
+                print(f"  {j+1}. {api_call}")
+            print()
+            
+        return api_traces
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Analyze a harness file")
+    parser.add_argument("harness_path", type=str, help="Path to the harness file")
+    args = parser.parse_args()
+    
+    analyzer = CFGAnalyzer(args.harness_path)
+    analyzer.traverse_api_traces()
+
+    # For testing purposes, you can run the analyzer directly
+    # analyzer = CFGAnalyzer(harness)
+    # analyzer.traverse_api_traces()

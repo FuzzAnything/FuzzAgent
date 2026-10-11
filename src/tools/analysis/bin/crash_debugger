@@ -1,0 +1,121 @@
+#! /usr/bin/env python3
+
+import argparse
+import os
+import subprocess
+import sys
+import select
+import hashlib
+from project_utils import ProjectUtils
+
+def read_stdin(timeout_sec):
+    if sys.stdin.isatty():
+        return ""
+    rlist, _, _ = select.select([sys.stdin], [], [], timeout_sec)
+    if rlist:
+        return sys.stdin.read()
+    return ""
+
+def main():
+    parser = argparse.ArgumentParser(description="Stateful Crash Context Inspection (GDB Wrapper)")
+    parser.add_argument("fuzz_target_binary", type=str, help="Fuzz target binary")
+    parser.add_argument("crash_artifact", type=str, help="Crash artifact")
+    parser.add_argument("gdb_command", type=str, default="", help="GDB command to execute")
+    parser.add_argument("reset", type=int, nargs='?', choices=[0, 1], default=0, help="Reset (clear) the history file before executing commands (1 to reset)")
+    args = parser.parse_args()
+
+    gdb_cmd = args.gdb_command if args.gdb_command else read_stdin(2).strip()
+
+    if not gdb_cmd:
+        print("[!] Error: No GDB command provided via argument or stdin.")
+        sys.exit(1)
+
+    if not os.path.exists(args.fuzz_target_binary):
+        print(f"[!] Error: Fuzz target binary not found: {args.fuzz_target_binary}")
+        sys.exit(1)
+        
+    if not os.path.exists(args.crash_artifact):
+        print(f"[!] Error: Crash artifact not found: {args.crash_artifact}")
+        sys.exit(1)
+
+    fuzzer_abs_path = os.path.abspath(args.fuzz_target_binary)
+    session_str = f"{fuzzer_abs_path}_{os.path.abspath(args.crash_artifact)}"
+    session_id = hashlib.md5(session_str.encode()).hexdigest()
+    try:
+        fuzzer_dir = os.path.dirname(fuzzer_abs_path)
+        fuzzer_id = ProjectUtils.get_fuzzer_id_from_path(fuzzer_dir)
+        fuzzer_cache_dir = ProjectUtils.get_cache_fuzzer_dir(fuzzer_id)
+        history_file = os.path.join(fuzzer_cache_dir, f"gdb_history_{session_id}.txt")
+    except:
+        history_file = f"/tmp/gdb_history_{session_id}.txt"
+    print(f"[*] Using history file: {history_file}")
+
+
+    history = []
+    if args.reset == 1 and os.path.exists(history_file):
+        os.remove(history_file)
+        
+    if os.path.exists(history_file):
+        with open(history_file, "r") as f:
+            history = f.read().splitlines()
+
+    new_commands = [cmd.strip() for cmd in gdb_cmd.split(',') if cmd.strip()]
+    history.extend(new_commands)
+    
+    with open(history_file, "w") as f:
+        f.write("\n".join(history) + "\n")
+
+    os.environ["GDB_HISTORY_FILE"] = history_file
+    
+    driver_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gdb_json_debugger.py")
+
+    try:
+        cmd = ["gdb", "-q", "--batch", "-x", driver_script, "--args", args.fuzz_target_binary, args.crash_artifact]
+        env = os.environ.copy()
+        env['DEBUGINFOD_URLS'] = ''
+        env['UBSAN_OPTIONS'] = "print_stacktrace=1:halt_on_error=0"
+
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=120, env=env)
+        output = result.stdout
+        
+        import re
+        import json
+        match = re.search(r"===JSON_START===(.*?)===JSON_END===", output, re.DOTALL)
+        if match:
+            json_str = match.group(1).strip()
+            try:
+                parsed = json.loads(json_str)
+                
+                cmd_out = parsed.get("command_output", "")
+                if cmd_out:
+                    print(cmd_out)
+                    print("----------------------\n")
+                
+                status = parsed.get("status", "stopped")
+                if status == "not_running":
+                    print("[!] No active execution context. The program is not running. Consider using the 'run' command.")
+                else:
+                    if parsed.get("pwndbg_context"):
+                         # The user expressly requested ONLY three components from pwndbg context:
+                         # 1. Source (源代码上下文) -> 2. Stack (堆栈) -> 3. BACKTRACE (BACKTRACE)
+                         print(parsed.get("pwndbg_context").strip())
+                    elif parsed.get("source"):
+                         # Fallbacks only if pwndbg entirely missing
+                         print("1. 源代码上下文 (Fallback)\n")
+                         print(parsed.get("source", "N/A"))
+                         print("\n2. 堆栈 (Fallback)\n")
+                         print(str(parsed.get("registers", "N/A")))
+                         print("\n3. BACKTRACE (Fallback)\n")
+                         print(str(parsed.get("backtrace", "N/A")))
+            except json.JSONDecodeError:
+                print("--- Raw Output ---")
+                print(output)
+        else:
+            print("--- Output ---")
+            print(output.strip())
+            
+    except subprocess.TimeoutExpired as e:
+        print(f"[!] GDB execution timed out after 120 seconds.")
+
+if __name__ == "__main__":
+    main()

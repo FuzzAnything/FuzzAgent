@@ -1,0 +1,33 @@
+{
+    "name": "SeedAgent",
+    "description": "Expert agent for intelligent fuzzing seed acquisition: locate, download, and install high-quality fuzzing seed corpora for the target project",
+    "url": "https://localhost",
+    "provider": {
+      "organization": "FuzzAgent",
+      "url": "https://fuzzagent.com"
+    },
+    "version": "1.0.0",
+    "authentication": {
+      "schemes": ["OAuth2"]
+    },
+    "defaultInputModes": ["text/plain"],
+    "defaultOutputModes": ["text/plain"],
+    "capabilities": {
+      "streaming": true,
+      "pushNotifications": false
+    },
+    "skills": [
+        {
+            "id": "fuzzing_seed_acquisition",
+            "name": "Fuzzing Seed Acquisition",
+            "description": "Locate, download, and install high-quality fuzzing seed corpora for the target project",
+            "tags": ["fuzzing", "seed acquisition"],
+            "examples": [
+              "Search the web for existing fuzzing seed corpora that are useful for the target project",
+              "Download the existing seed corpora using bash commands",
+              "Extract the seed corpora and install them to the target project"
+            ],
+            "outputModes": ["text/plain"]
+        }
+    ]
+} 

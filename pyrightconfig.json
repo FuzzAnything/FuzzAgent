@@ -1,0 +1,14 @@
+{
+  "typeCheckingMode": "basic",
+  "exclude": [
+    "output",
+    "working_dir",
+    "logs",
+    "archive",
+    "docker",
+    "**/__pycache__/**",
+    "**/.venv/**",
+    "so_files"
+  ],
+  "reportMissingImports": false
+}

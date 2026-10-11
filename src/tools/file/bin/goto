@@ -1,0 +1,46 @@
+#!/bin/bash
+
+source defaults.sh
+
+# @yaml
+# signature: goto <line_number>
+# docstring: moves the window to show <line_number>
+# arguments:
+#   line_number:
+#     type: integer
+#     description: the line number to move the window to
+#     required: true
+goto() {
+    if [ $# -gt 1 ]; then
+        echo "goto allows only one line number at a time."
+        return
+    fi
+    if [ -z "$CURRENT_FILE" ]
+    then
+        echo "No file open. Use the open command first."
+        return
+    fi
+    if [ -z "$1" ]
+    then
+        echo "Usage: goto <line>"
+        return
+    fi
+    if ! [[ $1 =~ ^[0-9]+$ ]]
+    then
+        echo "Usage: goto <line>"
+        echo "Error: <line> must be a number"
+        return
+    fi
+    local max_line=$(awk 'END {print NR}' "$CURRENT_FILE")
+    if [ $1 -gt $max_line ]
+    then
+        echo "Error: <line> must be less than or equal to $max_line"
+        return
+    fi
+    local OFFSET=$(jq -n "$WINDOW/6" | jq 'floor')
+    export CURRENT_LINE=$(jq -n "[$1 + $WINDOW/2 - $OFFSET, 1] | max | floor")
+    _constrain_line
+    _print
+}
+
+goto "$@"

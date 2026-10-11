@@ -1,0 +1,69 @@
+#!/usr/bin/env python3
+
+import os, sys
+import argparse
+import select
+import binascii
+
+# @yaml
+# write_bin_to_file:
+# signature:  |
+#     write_bin_to_file "<path>" << 'end_of_write_bin'
+#     <binary_string>
+#     end_of_write_bin
+# docstring: writes the given binary string (as text, e.g. hex or base64) to the given file. The content is terminated by a line with only end_of_write_bin on it. If the file does not exist, it will be created. If the file exists, it will be overwritten. 
+# arguments:
+#     - name: path
+#       type: string
+#       description: the path to the file to write to
+#       required: true
+#     - name: binary_string
+#       type: string
+#       description: the binary string to write to the file. Must be terminated by a line with only end_of_write_bin on it
+#       required: true
+
+usage = "Usage: write_bin_to_file \"path\" << 'end_of_write_bin'\n<hex or base64 string>\nend_of_write_bin"
+
+def read_with_timeout(timeout_sec):
+    rlist, _, _ = select.select([sys.stdin], [], [], timeout_sec)
+    if rlist:
+        return sys.stdin.read()
+    else:
+        raise TimeoutError("No input received within the timeout period")
+
+parser = argparse.ArgumentParser("write_bin_to_file", description="Write the given binary string (hex or base64) to the file at the given path. This command saves binary content to your specified file, creating it if it doesn't exist or overwriting its current contents if it does.")
+parser.add_argument("path", help="the path of file you want to write", type=str)
+parser.add_argument("--encoding", choices=["hex", "base64"], default="hex", help="encoding of the input string (default: hex)")
+
+parser = parser.parse_args()
+
+file_path = parser.path
+encoding = parser.encoding
+try:
+    content = read_with_timeout(3)
+except TimeoutError as e:
+    raise Exception(f"{e}\n{usage}")
+
+if not os.path.exists(file_path):
+    file_dir = os.path.dirname(file_path)
+    if file_dir and not os.path.exists(file_dir):
+        raise Exception(f"{file_dir} is not a regular file directory")
+
+# Remove trailing newlines and whitespace
+content = content.strip()
+
+try:
+    if encoding == "hex":
+        bin_data = binascii.unhexlify(content)
+    else:
+        import base64
+        bin_data = base64.b64decode(content)
+except Exception as e:
+    raise Exception(f"Failed to decode input as {encoding}: {e}")
+
+with open(file_path, "wb") as f:
+    f.write(bin_data)
+print(f"Saved binary data to {file_path}.")
+
+os.chmod(file_path, mode=0o755)
+exit(0)

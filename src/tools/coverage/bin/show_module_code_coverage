@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+
+import argparse
+from show_code_coverage import CoverageUtils
+
+from project_utils import ProjectUtils, print_debug
+import os
+import math
+from html_table_parser import HtmlTable
+
+class ModuleCovReport:
+
+    COVERAGE_PAGE_SIZE = 50
+
+    def __init__(self, coverage_dir: str, path: str = '/', page: int = 1):
+        self.coverage_dir = os.path.join(coverage_dir, "source_coverage", ProjectUtils.get_project_name())
+        self.path = path
+        self.page = page
+        self.parser_cov_table()
+        
+    def parser_cov_table(self):
+        print_debug(f"coverage_dir: {self.coverage_dir}, path: {self.path}, page: {self.page}")
+        self.path = self.path.lstrip('/')
+        path = os.path.join(self.coverage_dir, self.path)
+        text_entry = path + ".txt"
+        if os.path.exists(text_entry):
+            print(f"[+] HINT: Text based coverage is not supported in this tool. Please directly open the file: {text_entry}.")
+            exit(0)
+        if not os.path.exists(path):
+            print(f"[!] ERROR: {path} does not exist! Please enter a valid and absolute path. In this tool, the absolute path of the source code is: '/' not '/root/src/' or '/home/user/src/'.")
+            exit(-1)
+        report_html = os.path.join(path, "report.html")
+        if not os.path.exists(report_html):
+            raise Exception(f"[!] Error: {report_html} does not exist!")
+        table = HtmlTable.load_from_file(report_html)
+        self.table = table
+        if self.path == '':
+            self.inject_harness_coverage()
+    
+    def inject_harness_coverage(self):
+        harness_files = []
+        for file in os.listdir(self.coverage_dir):
+            if not file.startswith("harness_"):
+                continue
+            if not file.endswith(".html"):
+                continue
+            if file.endswith("cpp.html"):
+                continue
+            harness_files.append(file)
+        for file in harness_files:
+            harness_path = os.path.join(self.coverage_dir, file)
+            harness_table = HtmlTable.load_from_file(harness_path)
+            for row in harness_table.rows:
+                self.table.rows.append(row)
+
+
+    def display_page(self, rows):
+        # Create a temporary table for display
+        temp_table = HtmlTable(self.table.headers, rows, self.table.footers)
+        temp_table.display()
+        
+        # Show pagination info
+        current_total = len(self.table.rows)
+        total_pages = math.ceil(current_total / self.COVERAGE_PAGE_SIZE)
+        info = f"Current Path: /{self.path}, Current Page: {self.page}, Total Page: {total_pages}"
+        print(info)
+
+    def display(self):
+        rows = self.table.rows[self.COVERAGE_PAGE_SIZE * (self.page - 1) : self.COVERAGE_PAGE_SIZE * (self.page)]
+        self.display_page(rows)
+
+    def list_all_modules(self):
+        """List all modules without pagination"""
+        self.table.display()
+        print(f"Total modules: {len(self.table.rows)}")
+
+
+
+def handle_module(path: str, page: int, fuzzer_id: int | None):
+    if fuzzer_id is not None:
+        CoverageUtils.execute_coverage_collection_pipeline(fuzzer_id)
+        coverage_dir = ProjectUtils.get_fuzzer_coverage_dir(fuzzer_id)
+    else:
+        CoverageUtils.gather_whole_project_coverage_pipeline()
+        coverage_dir = ProjectUtils.get_project_coverage_dir()
+    report = ModuleCovReport(coverage_dir, path, page)
+    report.display()
+
+
+if __name__ == "__main__":
+    module_parser = argparse.ArgumentParser(description="Show module-level coverage details")
+    #module_parser.add_argument(
+    #     "--fuzzer_id",
+    #     type=int,
+    #     required=False,
+    #     default=-1,
+    #     help="Fuzzer instance ID to show coverage for (-1 = merge all fuzzers)"
+    #)
+    module_parser.add_argument(
+        "path",
+        type=str,
+        help="Path to the module to show coverage for",
+    )
+    module_parser.add_argument(
+        "page",
+        type=int,
+        help="Page number to show coverage for",
+    )
+    module_parser.add_argument(
+        "--fuzzer_id",
+        type=int,
+        required=False,
+        default=None,
+        help="Fuzzer ID to show coverage for",
+    )
+    args = module_parser.parse_args()
+    path = args.path if args.path != "None" else '/'
+    page = args.page
+    fuzzer_id = args.fuzzer_id
+    handle_module(path, page, fuzzer_id)

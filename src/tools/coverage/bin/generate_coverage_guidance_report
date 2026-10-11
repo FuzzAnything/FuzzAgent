@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import sys
+from pathlib import Path
+import re
+from project_utils import FuzzerExecutionState, ProjectUtils
+import shutil
+import select
+
+
+def read_with_timeout(timeout_sec):
+    # Check if stdin is a readable stream, `timeout_sec` is the timeout in seconds
+    rlist, _, _ = select.select([sys.stdin], [], [], timeout_sec)
+    if rlist:  # If there is data to read
+        return sys.stdin.read()
+    else:  # Timeout occurred
+        raise TimeoutError("No input received within the timeout period")
+
+def generate_coverage_report(harness_id: int, content: str) -> None:
+    coverage_guidance_dir = ProjectUtils.get_project_coverage_guidance_dir()
+    next_guidance_file = os.path.join(coverage_guidance_dir, f"harness_{harness_id:03d}_guidance.md")
+    with open(next_guidance_file, 'w') as f:
+        f.write(content)
+    print(f"[+] The coverage guidance for the next harness [{harness_id:03d}] has been recorded in: {next_guidance_file}")
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate normalized crash report file")
+    parser.add_argument("harness_id", type=int, help="The ID of the next harness to generate the coverage guidance for")
+    # positional args (content is positional to make it non-interactive)
+    args = parser.parse_args()
+    try:
+        content = read_with_timeout(3)
+    except TimeoutError as e:
+        raise Exception(f"{e}\n")
+    
+    generate_coverage_report(args.harness_id, content)
+
+
+
+
+

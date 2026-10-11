@@ -1,0 +1,14 @@
+tools:
+  compile_and_check_harness:
+    timeout: 1200
+    signature: compile_and_check_harness <harness_id> [<extra_flags>]
+    docstring: Compile the harness to fuzzers and check whether it contains compilation errors. The compiler flags for fuzzing is equipped internally.
+    arguments:
+      - name: harness_id
+        type: integer
+        description: The harness instance ID to compile. E.g., 000, 001, etc.
+        required: true
+      - name: extra_flags
+        type: string
+        description: The extra flags used to compile the harness. Provide it only if you encountered fatal compilation errors.
+        required: false

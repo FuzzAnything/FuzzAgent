@@ -1,0 +1,32 @@
+{
+    "name": "CrashAnalyzerAgent",
+    "description": "A professional fuzz testing crash root cause analysis system with comprehensive functions of deduplication, classification, analysis and reproduction of crashes. The agent is good at analyzing, classifying, evaluating existing crash results in `$CRASH` and generating reports in `$CRASH_REPORT`, and can distinguish the source of the crash, such as from the harness or from the library. The agent also returns a summary report for easy analysis.",
+    "url": "https://localhost",
+    "provider": {
+      "organization": "FuzzAgent",
+      "url": "https://fuzzagent.com"
+    },
+    "version": "1.0.0",
+    "authentication": {
+      "schemes": ["OAuth2"]
+    },
+    "defaultInputModes": ["text/plain"],
+    "defaultOutputModes": ["text/plain"],
+    "capabilities": {
+      "streaming": true,
+      "pushNotifications": false
+    },
+    "skills": [
+      {
+        "id": "crash_analysis",
+        "name": "Crash Analysis & Classification",
+        "description": "Analyzes crash reports to classify them based on severity, type, and potential root causes. Generates a summary report of the analysis.",
+        "tags": ["crash analysis", "classification", "report generation"],
+        "examples": [
+          "Analyze the crash reports in `$CRASH` and classify them into categories.",
+          "Generate a summary report of the crash analysis results."
+        ],
+        "outputModes": ["text/plain"]
+      }
+    ]
+  }

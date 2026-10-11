@@ -1,0 +1,23 @@
+#!/usr/bin/env python
+
+import argparse
+from func_cov_utils import APICovUtils
+from project_utils import ProjectUtils
+from show_code_coverage import CoverageUtils
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("page", type=int, default=1)
+    parser.add_argument("--fuzzer_id", type=int, required=False, default=None, help="Fuzzer ID to show coverage for")
+    args = parser.parse_args()
+    page = args.page
+    fuzzer_id = args.fuzzer_id
+    if fuzzer_id is not None:
+        CoverageUtils.execute_coverage_collection_pipeline(fuzzer_id)
+        coverage_dir = ProjectUtils.get_fuzzer_coverage_dir(fuzzer_id)
+    else:
+        CoverageUtils.gather_whole_project_coverage_pipeline()
+        coverage_dir = ProjectUtils.get_project_coverage_dir()
+    coverage = APICovUtils(coverage_dir)
+    coverage.display(page=page)
+

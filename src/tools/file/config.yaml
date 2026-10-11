@@ -1,0 +1,153 @@
+tools:
+  open:
+    timeout: 30
+    signature: open "<path>" [<line_number>]
+    docstring: opens the file at the given path in the editor. If line_number is provided, the window will be move to include that line.
+    arguments:
+      - name: path
+        type: string
+        description: the path to the file to open
+        required: true
+      - name: line_number
+        type: integer
+        description: the line number to move the window to (if not provided, the window will start at the top of the file)
+        required: false
+  write_file:
+    timeout: 30
+    signature: |-
+      write_file "<path>" << 'end_of_write'
+      <content>
+      end_of_write
+    docstring: writes the given content to the given file. Make sure your indentation is formatted properly. If the file does not exist, it will be created. If the file exists, it will be overwritten. 
+    arguments:
+      - name: path
+        type: string
+        description: the path to the file to write to
+        required: true
+      - name: content
+        type: string
+        description: the content to write to the file. 
+        required: true
+        redirect: true
+  goto:
+    timeout: 30
+    signature: goto <line_number>
+    docstring: moves the window to show <line_number>
+    arguments:
+      - name: line_number
+        type: integer
+        description: the line number to move the window to
+        required: true
+  scroll_up:
+    timeout: 30
+    signature: scroll_up
+    docstring: moves the window up {WINDOW} lines
+  scroll_down:
+    timeout: 30
+    signature: scroll_down
+    docstring: moves the window down {WINDOW} lines
+  edit:
+    timeout: 30
+    signature: |-
+      edit <start_line>:<end_line> [<file_path>] << 'end_of_edit'
+      <replacement_text>
+      end_of_edit
+    docstring: replaces lines <start_line> through <end_line> (inclusive) with the given text in the specified file or the currently open file. All of the <replacement text> will be entered, so make sure your indentation is formatted properly. A backup file is automatically created in /tmp directory before editing, which can be used with undo_edit command.
+    arguments:
+      - name: start_line
+        type: integer
+        description: the line number to start the edit at
+        required: true
+      - name: end_line
+        type: integer
+        description: the line number to end the edit at (inclusive)
+        required: true
+      - name: file_path
+        type: string
+        description: the path to the file to edit (if not provided, uses the currently open file)
+        required: false
+      - name: replacement_text
+        type: string
+        description: the text to replace the current selection with
+        required: true
+        redirect: true
+  undo_edit:
+    timeout: 30
+    signature: undo_edit
+    docstring: undoes the last edit operation by restoring the file from the backup created in /tmp directory. This will revert the file to its state before the most recent edit command.
+    arguments: []
+  write_bin_to_file:
+    timeout: 30
+    signature: |-
+      write_bin_to_file <path> << 'end_of_write_bin'
+      <binary_string>
+      end_of_write_bin
+    docstring: writes the given binary string (as text, e.g. hex or base64) to the given file. If the file does not exist, it will be created. If the file exists, it will be overwritten. Supports hex (default) and base64 encoding via --encoding argument.
+    arguments:
+      - name: path
+        type: string
+        description: the path to the file to write to
+        required: true
+      - name: binary_string
+        type: string
+        description: the binary string to write to the file. 
+        required: true
+        redirect: true
+      - name: encoding
+        type: string
+        description: "encoding of the input string (`hex` or `base64`, default: `hex`)"
+        required: false
+  search_dir:
+    timeout: 30
+    signature: search_dir <search_term> [<dir>]
+    docstring: searches for search_term in all files in dir. If dir is not provided, searches in the current directory.
+    arguments:
+      - name: search_term
+        type: string
+        description: the term to search for
+        required: true
+      - name: dir
+        type: string
+        description: the directory to search in
+        required: false
+  search_file:
+    timeout: 30
+    signature: search_file <search_term> [<file>]
+    docstring: searches for search_term in file. If file is not provided, searches in the current open file
+    arguments:
+      - name: search_term
+        type: string
+        description: the term to search for
+        required: true
+      - name: file
+        type: string
+        description: the file to search in (if not provided, searches in the current open file)
+        required: false
+  find_file:
+    timeout: 30
+    signature: find_file <file_name> [<dir>]
+    docstring: finds all files with the given name in dir. If dir is not provided, searches in the current directory
+    arguments:
+      - name: file_name
+        type: string
+        description: the name of the file to search for
+        required: true
+      - name: dir
+        type: string
+        description: the directory to search in
+        required: false
+  search_web:
+    timeout: 60
+    max_output_lines: 1500
+    signature: search_web <path>
+    docstring: |
+      Retrieves directory listings or file contents from the google/oss-fuzz repository. Enter the path to view the contents of the path.
+    arguments:
+      - name: path
+        type: string
+        description: |
+          The relative path within the 'projects/' directory. 
+          - To list all available projects, pass "list". 
+          - To inspect a specific project, pass the project name (e.g., "zlib"). 
+          - To read a file, pass the full path (e.g., "zlib/build.sh").
+        required: true

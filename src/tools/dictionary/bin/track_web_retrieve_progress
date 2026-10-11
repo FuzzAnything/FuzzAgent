@@ -1,0 +1,65 @@
+#!/usr/bin/env python3
+import os
+import argparse
+import json
+from project_utils import ProjectUtils
+
+
+def get_web_retrieve_progress_file_path(task_kind: str):
+    return os.path.join(ProjectUtils.get_project_cache_dir(), f"{task_kind}_progress.json")
+
+def record_web_retrieve_progress(task_kind: str, project_names: list[str]):
+    progress_file_path = get_web_retrieve_progress_file_path(task_kind)
+    # check if progress is already recorded
+    if os.path.exists(progress_file_path):
+        with open(progress_file_path, "r") as f:
+            project_progress = json.load(f)
+        print(f"[*] Found {task_kind} web retrieve progress already recorded.\n")
+        print(f"[*] Loading existing project progress:\n")
+        for project_name, progress in project_progress.items():
+            print(f"    - {project_name}: {progress}")
+        return
+    
+    progress = {}
+    for project_name in project_names:
+        progress[project_name] = "incomplete"
+    with open(progress_file_path, "w") as f:
+        f.write(json.dumps(progress, indent=4))
+    print(f"[*] Recorded {len(project_names)} new {task_kind} web retrieve tasks: {project_names}\n")
+
+def complete_web_retrieve_progress(task_kind: str, project_names: list[str]):
+    progress_file_path = get_web_retrieve_progress_file_path(task_kind)
+    if not os.path.exists(progress_file_path):
+        print(f"[!] ERROR: {task_kind} web retrieve progress tasks have not been recorded yet! Please record the tasks first using the `record_tasks` action.")
+        exit(-1)
+    with open(progress_file_path, "r") as f:
+        project_progress = json.load(f)
+    for project_name in project_names:
+        project_progress[project_name] = "completed"
+    with open(progress_file_path, "w") as f:
+        f.write(json.dumps(project_progress, indent=4))
+    print(f"[*] Completed {len(project_names)} {task_kind} web retrieve tasks: {project_names}\n")
+    print(f"[*] Loading current {task_kind} web retrieve progress:\n")
+    for project_name, progress in project_progress.items():
+        print(f"    - {project_name}: {progress}")
+
+if __name__ == "__main__":
+    print("[*] Tracking the web retrieve progress...")
+    parser = argparse.ArgumentParser(description="Track the web retrieve progress.")
+    parser.add_argument("task_kind", type=str, help="The task kind to track the web retrieve progress.", choices=["dictionary", "seed"])
+    parser.add_argument("action", type=str, help="The action to track the web retrieve progress.", choices=["record_tasks", "complete_tasks"])
+    parser.add_argument("project_names", type=str, help="The project names to track the web retrieve progress. Use comma to separate multiple project names.")
+    args = parser.parse_args()
+    task_kind = args.task_kind
+    action = args.action
+    project_names = args.project_names.split(",")
+    if len(project_names) == 0:
+        print("[!] ERROR: Invalid project names. Use comma to separate multiple project names.")
+        exit(-1)
+    if action == "record_tasks":
+        record_web_retrieve_progress(task_kind, project_names)
+    elif action == "complete_tasks":
+        complete_web_retrieve_progress(task_kind, project_names)
+    else:
+        print(f"[!] ERROR: Invalid action: {action}")
+        exit(-1)

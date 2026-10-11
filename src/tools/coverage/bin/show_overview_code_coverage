@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+
+from project_utils import print_debug
+from show_code_coverage import CoverageUtils, LLVM_COV_JSON_FILE_NAME
+from call_graph_analysis import CallGraph, parse_call_graph
+from header_analysis import get_public_apis
+from harness_analysis import extract_function_calls
+from project_utils import ProjectUtils
+from pydantic import BaseModel, Field
+import argparse
+
+from llvm_cov import LLVM_COV_DATA
+import os
+
+# MergedProjectProfile
+class MergedProjectStats():
+    statically_reachable_functions: int = Field(alias="statically-reachable-functions")
+    statically_reachable_branches: int = Field(alias="statically-reachable-branches")
+    runtime_covered_functions: int = Field(alias="runtime-covered-functions")
+    runtime_covered_branches: int = Field(alias="runtime-covered-branches")
+    total_functions: int = Field(alias="total-functions")
+    total_branches: int = Field(alias="total-branches")
+    harness_count: int = Field(alias="harness-count")
+
+    def __init__(self, harness_files: list[str], llvm_cov: LLVM_COV_DATA):
+        self.llvm_cov = llvm_cov
+        dot_path = ProjectUtils.get_project_wllvm_callgraph_file()
+        print_debug(f"[+] Parsing the call graph from {dot_path}...")
+        self.call_graph = parse_call_graph(dot_path)
+        print_debug("[+] Parsing the public APIs...")
+        self.public_apis = get_public_apis()
+        print_debug("[+] Extracting the function calls from the harnesses...")
+        function_calls = set()
+        for harness_file in harness_files:
+            function_calls.update(extract_function_calls(harness_file))
+        api_calls = set(self.public_apis) & function_calls
+        print_debug("[+] Calculating the total functions and branches...")
+        self.total_functions = self.llvm_cov.totals.functions.count
+        self.total_branches = self.llvm_cov.totals.branches.count
+        self.harness_count = len(harness_files)
+        self.runtime_covered_functions = self.llvm_cov.totals.functions.covered
+        self.runtime_covered_branches = self.llvm_cov.totals.branches.covered
+        self.calculate_static_metrics(api_calls)
+    
+    def calculate_static_metrics(self, api_calls: set[str]) -> None:
+        print_debug("[+] Calculate the Overall code coverage metrics.")
+        covered_functions = set()
+        for api in api_calls:
+            covered_functions.update(self.call_graph.get_all_reachable_functions(api))
+        self.statically_reachable_functions = len(covered_functions)
+        covered_branch = 0
+        for function in covered_functions:
+            function_coverage = self.llvm_cov.get_function_coverage(function)
+            if function_coverage is not None:
+                covered_branch += function_coverage.calculate_branch_complexity()
+        self.statically_reachable_branches = covered_branch
+    
+    def calculate_api_coverage(self) -> tuple[int, int]:
+        total_api_calls = 0
+        covered_api_calls = 0
+        for function in self.llvm_cov.functions:
+            if function.name in self.public_apis:
+                total_api_calls += 1
+                if function.count > 0:
+                    covered_api_calls += 1
+        return total_api_calls, covered_api_calls
+
+    def summary(self) -> str:
+        header =  "|:-----|:-----|:------|:------|:------|:------|\n"
+        header += "Statically reachable Functions| Statically reachable Branches | Runtime covered functions | Runtime covered branches| API Coverage\n"
+        header += "|:-----|:------|:------|:------|:------|:------|\n"
+        statical_function_percentage = self.statically_reachable_functions / self.total_functions * 100
+        statical_branch_percentage = self.statically_reachable_branches / self.total_branches * 100
+        runtime_function_percentage = self.runtime_covered_functions / self.total_functions * 100
+        runtime_branch_percentage = self.runtime_covered_branches / self.total_branches * 100
+        total_api_calls, covered_api_calls = self.calculate_api_coverage()
+        api_coverage_percentage = covered_api_calls / total_api_calls * 100
+        status = f"{self.statically_reachable_functions}/{self.total_functions} ({statical_function_percentage:.2f}%) | {self.statically_reachable_branches}/{self.total_branches} ({statical_branch_percentage:.2f}%) | {self.runtime_covered_functions}/{self.total_functions} ({runtime_function_percentage:.2f}%) | {self.runtime_covered_branches}/{self.total_branches} ({runtime_branch_percentage:.2f}%) | {covered_api_calls}/{total_api_calls} ({api_coverage_percentage:.2f}%)"
+        footnote = "|:-----|:------|:------|:------|:------|:------|\n"
+        if statical_function_percentage < runtime_function_percentage:
+            footnote += "[+] Hint: The statical statistics are collected by statically analyzing the harnesses. This number could be lower than the runtime statistics because the imperfect static analysis. In such cases, you should focus on the runtime statistics.\n"
+        response = header + status + "\n" + footnote
+        return response
+
+
+def handle_fuzzer_coverage_overview(fuzzer_id: int, replay_mode: bool = False):
+    print_debug(f"[+] Showing fuzzer {fuzzer_id} coverage overview...")
+    CoverageUtils.execute_coverage_collection_pipeline(fuzzer_id, replay_mode=replay_mode)
+    coverage_dir = ProjectUtils.get_fuzzer_coverage_dir(fuzzer_id)
+    llvm_cov_json_file = os.path.join(coverage_dir, LLVM_COV_JSON_FILE_NAME)
+    llvm_cov = LLVM_COV_DATA(llvm_cov_json_file)
+    merged_project_stats = MergedProjectStats(ProjectUtils.list_all_harnesses(), llvm_cov)
+    print(merged_project_stats.summary())
+
+def handle_whole_project_coverage_overview(replay_mode: bool = False):
+    import json as _json
+    import time as _time
+    from datetime import datetime, timezone
+
+    started = _time.time()
+    print_debug("[+] Showing whole project coverage overview...")
+    CoverageUtils.gather_whole_project_coverage_pipeline(replay_mode=replay_mode)
+    coverage_dir = ProjectUtils.get_project_coverage_dir()
+    llvm_cov_json_file = os.path.join(coverage_dir, LLVM_COV_JSON_FILE_NAME)
+    llvm_cov = LLVM_COV_DATA(llvm_cov_json_file)
+    merged_project_stats = MergedProjectStats(ProjectUtils.list_all_harnesses(), llvm_cov)
+    print(merged_project_stats.summary())
+
+    # Write run marker so downstream consumers (introspector) can verify
+    # THIS invocation actually produced fresh data. Best-effort: marker
+    # failure does not fail the whole run.
+    marker_path = os.path.join(coverage_dir, "last_run.json")
+    try:
+        llvm_cov_size = os.path.getsize(llvm_cov_json_file) if os.path.exists(llvm_cov_json_file) else 0
+        fuzzer_ids = CoverageUtils.get_available_fuzzers()
+        marker = {
+            "mode": "replay" if replay_mode else "normal",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "duration_seconds": _time.time() - started,
+            "fuzzer_count": len(fuzzer_ids),
+            "llvm_cov_json_path": llvm_cov_json_file,
+            "llvm_cov_json_size": llvm_cov_size,
+        }
+        with open(marker_path, "w") as fh:
+            _json.dump(marker, fh, indent=2)
+        print_debug(f"[+] Wrote run marker to {marker_path}: {marker}")
+    except Exception as exc:
+        print(f"[!] WARNING: Failed to write run marker: {exc}")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Show whole project coverage overview")
+    parser.add_argument("--fuzzer_id", type=int, help="Fuzzer ID", required=False, default=None)
+    parser.add_argument("--replay", action="store_true", help="Force regenerate the coverage data")
+    args = parser.parse_args()
+    fuzzer_id = args.fuzzer_id
+    replay_mode = args.replay
+    if fuzzer_id is not None:
+        handle_fuzzer_coverage_overview(fuzzer_id, replay_mode=replay_mode)
+    else:
+        handle_whole_project_coverage_overview(replay_mode=replay_mode)
+
+
