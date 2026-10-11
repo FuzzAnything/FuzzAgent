@@ -3,14 +3,6 @@
 Post-fuzzing analysis package for FuzzAgent. Runs inside the analysis container
 after the core fuzzing engine finishes, producing structured JSON output.
 
-> **Scope note.** This package previously hosted several post-run analyses
-> (`coverage_over_time`, `token_cost`, `instr_classify`, `agent_gantt`). Those
-> have been **migrated to the FuzzAgent-Storage Rust normalizer** (and
-> `coverage_over_time` is produced on demand by Storage's
-> `generate_coverage_over_time`). Only the **final coverage reply** remains
-> here. Do not reintroduce the migrated analyses in this package — keep them in
-> Storage.
-
 ## Quick Start
 
 ```bash
@@ -114,11 +106,3 @@ template, changing only:
 
 The analysis results are then picked up by the Storage normalizer and exposed
 through the Backend API for frontend visualization.
-
-## Legacy Scripts
-
-The original standalone scripts in `statistics/`
-(`analysis_coverage_over_time.py`, `analysis_final_coverage.py`,
-`analyze_token_cost.py`, `draw_agent_gantt.py`, `instr_classify.py`) are
-superseded by this package and by the Storage normalizer. They are kept for
-reference but should not be used directly.

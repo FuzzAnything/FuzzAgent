@@ -76,13 +76,22 @@ $OUTPUT/
 
 **API Selection Strategy** (in priority order):
 1. **Manager-Specified Targets**: Always prioritize APIs explicitly mentioned in Manager specifications
-2. **Dependency Chain Completion**: Include necessary helper functions for proper API initialization and cleanup
+2. **Dependency Chain Completion**: Resolve the dependencies needed to realize the target APIs and intended behavior using the procedure below
 
 **Coverage-Driven Design Rules**:
-- Call as many target APIs has dependencies as possible to maximize coverage
+- Compose target APIs with their required supporting calls to make the intended behavior reachable
 - Include input validation and error handling paths where possible
 - Implement necessary state setup for complex API sequences
 - Ensure proper resource management (allocation/deallocation patterns)
+
+### Dependency-Aware Harness Generation
+Before implementation, inspect API declarations, implementations, data types, documentation, call sites, and available consumer code. Starting from the specified target APIs and intended behavior, recover four dependency types:
+- **Construction**: Trace required objects back to allocators, factories, or initializers and the configuration needed to create valid objects.
+- **Data flow**: Pass return values and output parameters to downstream API arguments, preserving object identity and buffer lifetimes.
+- **Temporal and state**: Establish prerequisite state transitions and call ordering from implementation guards, documented contracts, and consumer usage; type compatibility alone does not establish valid composition.
+- **Ownership**: Track resource acquisition, ownership transfer, and release on both success and error paths.
+
+Record API instances and these dependency relations in the design plan as a dependency graph. Expand backward from the targets until every resource requirement and API constraint is satisfied, retaining only calls that contribute to this dependency closure. Linearize it into a valid **setup -> target operations -> teardown** sequence with prerequisite-success checks and cleanup on error paths, preserving the specified target ordering and intended state transitions.
 
 ## 2. Fuzzer Input Processing
 

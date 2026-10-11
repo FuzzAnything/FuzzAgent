@@ -22,7 +22,7 @@ You can follow the [official guide](https://docs.docker.com/engine/install/ubunt
 
 - Build an image from Dockerfile:
 ```bash
-cd FuzzAgent-Core
+cd FuzzAgent
 docker buildx build -t fuzzagent -f docker/Dockerfile .
 ```
 
