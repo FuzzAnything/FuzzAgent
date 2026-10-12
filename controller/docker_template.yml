@@ -32,6 +32,7 @@ services:
       - LLM_TOP_K=${LLM_TOP_K:-20}
       - LLM_REPLY_TIMEOUT=${LLM_REPLY_TIMEOUT:-600}
       - MAX_AGENT_EPOCHS=${MAX_AGENT_EPOCHS:-100}
+      - FUZZING_DURATION=${FUZZING_DURATION:-24h}
       - REMINDER_TOKEN_RATIO=${REMINDER_TOKEN_RATIO:-0.8}
       - MAX_TOKEN_LEN=${MAX_TOKEN_LEN:-128000}
       - OSS_ACCESS_KEY_ID=${OSS_ACCESS_KEY_ID:-}
@@ -39,10 +40,3 @@ services:
       - OSS_ENDPOINT=${OSS_ENDPOINT:-}
       - OSS_BUCKET=${OSS_BUCKET:-}
     restart: "no"
-    networks:
-      - fuzz_shared_net
-
-networks:
-  fuzz_shared_net:
-    external: true
-    name: fuzz_bridge
