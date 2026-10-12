@@ -1,10 +1,9 @@
 FuzzAgent Dual License
 
-Copyright (C) 2024-2026 FuzzAgent Authors
+Copyright (C) 2026 FuzzAgent Authors
 
-Except for files or components that contain a separate license notice,
-FuzzAgent is available under a dual-license model. You may use FuzzAgent
-under either:
+FuzzAgent is distributed as a whole under a dual-license model.
+You may use FuzzAgent under either:
 
 1. GNU Affero General Public License, Version 3 only (AGPL-3.0-only), as
    reproduced below; or
@@ -14,7 +13,23 @@ under either:
    distribution, or network deployment without the obligations of the
    AGPL-3.0-only. No commercial license is granted by this file.
 
-Third-party components remain subject to their respective license terms.
+   If you cannot comply with the requirements of AGPL-3.0-only for your
+   intended use of FuzzAgent, obtain a separate commercial license
+   before proceeding.
+
+Commercial licensing contact: [fuzzanything@gmail.com](mailto:fuzzanything@gmail.com)
+
+Applicable upstream license conditions continue to apply to included
+third-party code under either option. Upstream copyright notices, license
+texts, and permissions are preserved. See THIRD_PARTY_NOTICES and
+THIRD_PARTY_LICENSES/ for component details and license texts.
+
+Perses is a separate, optional external program and is not part of the
+FuzzAgent distribution. It and other separately installed external
+programs retain their own licenses. A commercial license for FuzzAgent
+does not cover Perses or grant exceptions to its GPL-3.0-or-later terms.
+FuzzAgent's installer and command-line adapter are covered by this file;
+see THIRD_PARTY_NOTICES for details of the external integration.
 
 -------------------------------------------------------------------------------
 
@@ -679,3 +694,10 @@ specific requirements.
 if any, to sign a "copyright disclaimer" for the program, if necessary.
 For more information on this, and how to apply and follow the GNU AGPL, see
 <https://www.gnu.org/licenses/>.
+
+-------------------------------------------------------------------------------
+
+If you cannot comply with the requirements of AGPL-3.0-only for your intended
+use of FuzzAgent, obtain a separate commercial license before proceeding.
+
+To obtain a commercial license, contact [fuzzanything@gmail.com](mailto:fuzzanything@gmail.com).
