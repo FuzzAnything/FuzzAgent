@@ -1,5 +1,6 @@
 import os
 from openai import OpenAI
+import httpx
 from abc import ABC, abstractmethod
 from src.utils.config import CONFIG
 from src.memory.summarizer import AgentSummarizer
@@ -18,7 +19,12 @@ import traceback
 
 class BaseAgent(ABC):
     client = OpenAI(
-        api_key=os.getenv("OPENAI_API_KEY"), base_url=CONFIG.LLMARGs["OPENAI_API_BASE"]
+        api_key=os.getenv("OPENAI_API_KEY"), base_url=CONFIG.LLMARGs["OPENAI_API_BASE"],
+        timeout=(
+            httpx.Timeout(None)
+            if CONFIG.LLMARGs["LLM_REPLY_TIMEOUT"] is None
+            else CONFIG.LLMARGs["LLM_REPLY_TIMEOUT"]
+        ),
     )
     logger = get_logger("Base Agent")
     aci = ACI(logger)
@@ -110,7 +116,7 @@ class BaseAgent(ABC):
         self.register_agent_pre_call()
         #self.history_processor.extend_user_msg(content=FRIST_ACTION_PLANNING_PROMPT)
 
-        while epoch < self.MAX_AGENT_EPOCHS:
+        while self.MAX_AGENT_EPOCHS is None or epoch < self.MAX_AGENT_EPOCHS:
             self.logger.info(msg=f"Epoch: {epoch}")
             response_text = ""
             tool_call = None
@@ -182,7 +188,7 @@ class BaseAgent(ABC):
         # Terminate the bash subprocess
         #self.aci.kill_process_tree(self.aci.bash_subprocess)
 
-        if epoch >= self.MAX_AGENT_EPOCHS:
+        if self.MAX_AGENT_EPOCHS is not None and epoch >= self.MAX_AGENT_EPOCHS:
             self.exit_reason = "The agent has reached the maximum number of epochs. End of the agent execution."
         # Generate and save summary after execution ends
         #self.summarizer.generate_and_save_summary(agent_name=self.get_agent_name(), original_input=input_msg, exit_reason=self.exit_reason, conversation_history=self.history_processor.get_messages())

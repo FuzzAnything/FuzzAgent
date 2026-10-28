@@ -13,6 +13,13 @@ if _MISSING:
 _script_path = os.path.realpath(__file__)
 
 _script_dir = os.path.dirname(_script_path)
+
+
+def _optional_llm_timeout() -> int | None:
+    raw = os.environ.get("LLM_REPLY_TIMEOUT", "600").strip().lower()
+    return None if raw in {"none", "unlimited"} else int(raw)
+
+
 class ACIVariables(BaseModel):
     CURRENT_FILE: str = ""
     CURRENT_LINE: int = 0
@@ -30,7 +37,7 @@ class ACIVariables(BaseModel):
 class LLMArgs(BaseModel):
     OPENAI_API_BASE: str = os.environ["OPENAI_BASE_URL"]
     OPENAI_MODEL: str = os.environ["OPENAI_MODEL"]
-    LLM_REPLY_TIMEOUT: int = int(os.environ.get("LLM_REPLY_TIMEOUT", 600))
+    LLM_REPLY_TIMEOUT: int | None = _optional_llm_timeout()
     LLM_TEMPERATURE: float = float(os.environ.get("LLM_TEMPERATURE", 0.6))
     MAX_AGENT_EPOCHS: int = int(os.environ.get("MAX_AGENT_EPOCHS", 100))
     LLM_TOP_P: float = float(os.environ.get("LLM_TOP_P", 0.9))

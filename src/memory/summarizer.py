@@ -7,6 +7,7 @@ from src.utils.llm import query_llm
 from src.utils.config import CONFIG
 from src.utils.log import get_logger
 from openai import OpenAI
+import httpx
 from src.utils.project import get_agent_summary_file
 
 # Maximum length for showing summaries to manager
@@ -60,7 +61,12 @@ class AgentSummarizer:
     def __init__(self):
         self.client = OpenAI(
             api_key=os.getenv("OPENAI_API_KEY"), 
-            base_url=CONFIG.LLMARGs["OPENAI_API_BASE"]
+            base_url=CONFIG.LLMARGs["OPENAI_API_BASE"],
+            timeout=(
+                httpx.Timeout(None)
+                if CONFIG.LLMARGs["LLM_REPLY_TIMEOUT"] is None
+                else CONFIG.LLMARGs["LLM_REPLY_TIMEOUT"]
+            ),
         )
         self.logger = get_logger("AgentSummarizer")
         self.summary_file = get_agent_summary_file()
