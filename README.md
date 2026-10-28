@@ -111,7 +111,10 @@ The launcher caches checkouts in `.cache/targets/<target>` and saves results in 
 
 ## License
 
-FuzzAgent is dual-licensed under **[AGPL-3.0-only](LICENSE)** or a separate **commercial license** obtained from the copyright holders. Companies may use FuzzAgent under the AGPL; commercial licensing provides an alternative for deployments or integrations that need different terms. Third-party components retain their respective licenses.
+FuzzAgent is dual-licensed under **[AGPL-3.0-only](LICENSE)** or a separate **commercial license** obtained from the copyright holders. You can choose either option:
+1. **Open-source license (AGPL-3.0-only)**. Use, modify, and share HarnessMinimizer under the AGPL's terms. If you distribute covered binaries, provide the corresponding source as required by the license. If you run a modified version as a network service, offer its corresponding source to users who interact with it remotely. Full terms: [LICENSE](LICENSE).
+
+2. **Commercial license**. If you cannot or do not want to meet the AGPL requirements for your intended use, obtain a separately negotiated commercial license before proceeding. Contact fuzzanything@gmail.com. This repository does not grant a commercial license.
 
 ## Citation
 
