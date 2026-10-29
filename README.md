@@ -131,4 +131,6 @@ If you use FuzzAgent in your research, please cite our [paper](https://arxiv.org
       url={https://arxiv.org/abs/2605.14431},
 }
 ```
-# FuzzAgent
+
+## Evaluation Artifacts
+The evaluation artifacts in our paper: https://github.com/FuzzAnything/FuzzAgent-Artifacts
