@@ -1,120 +1,206 @@
 #!/usr/bin/env python3
+"""Reduce one crash with HarnessMinimizer without replacing the active fuzzer."""
 import argparse
+from contextlib import nullcontext
+import json
 import os
+from pathlib import Path
+import shlex
 import shutil
+import signal
 import subprocess
-from typing import List
+import sys
+import tempfile
+
 from project_utils import ProjectUtils, CompileKind
-from harnessreducer.api import process
 
-def list_archive_libraries(lib_dir: str) -> List[str]:
-    archive_libraries = []
-    for file in os.listdir(lib_dir):
-        if file.endswith(".a"):
-            lib_file = os.path.join(lib_dir, file)
-            archive_libraries.append(lib_file)
-    return archive_libraries
+# Run the API in its own environment: uv run/sync manages FuzzAgent's environment.
+REDUCTION_SCRIPT = """
+from dataclasses import asdict
+import json
+from pathlib import Path
+import sys
+from harnessminimizer import ReductionConfig, reduce_with_config
 
-def get_compilation_flags(extra_flags: str) -> list[str]:
-    flags = [
-        f"-I{ProjectUtils.get_project_header_include_dir()}"
-         f"-I{ProjectUtils.get_project_3rdparty_include_dir(ProjectUtils.get_build_work_dir(CompileKind.Sanitizer))}",]
-    lib_dir = os.path.join(ProjectUtils.get_build_work_dir(CompileKind.Sanitizer), "lib")
-    static_lib_files = list_archive_libraries(lib_dir)
-    flags.append("-Wl,--start-group")
-    for lib in static_lib_files:
-        flags.append(lib)
-    
-    third_party_libs = ProjectUtils.get_project_3rdparty_libs_from_dir(ProjectUtils.get_build_work_dir(CompileKind.Sanitizer))
-    for third_party_lib in third_party_libs:
-        flags.append(third_party_lib)
-    
-    # Add zlib and math library linking flags for libpng after static libraries
-    if extra_flags.strip():
-        flags.extend(extra_flags.strip().split())
-    flags.append("-Wl,--end-group")
-    return flags
+config = ReductionConfig(**json.loads(Path(sys.argv[1]).read_text()))
+result = reduce_with_config(config)
+Path(sys.argv[2]).write_text(json.dumps(asdict(result)))
+"""
+REDUCTION_TIMEOUT = 1080
 
-def load_extra_flags(harness_id: int) -> str:
-    cache_output_dir = ProjectUtils.get_cache_fuzzer_dir(harness_id)
-    extra_flags_file = os.path.join(cache_output_dir, "extra_flags.txt")
-    if os.path.exists(extra_flags_file):
-        with open(extra_flags_file, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    return ""
 
-def find_crash_artifact(fuzzer_id: int) -> str | None:
-    crash_dir = ProjectUtils.get_fuzzer_crash_dir(fuzzer_id)
-    if not os.path.exists(crash_dir):
-        return None
-    for entry in os.listdir(crash_dir):
-        if entry.startswith("crash-"):
-            return os.path.join(crash_dir, entry)
-    return None
+def split_extra_flags(extra_flags: str) -> tuple[list[str], list[str]]:
+    """Separate cached compiler options from libraries and linker options."""
+    compile_flags, link_flags = [], []
+    tokens = iter(shlex.split(extra_flags))
+    for flag in tokens:
+        if flag in ("-L", "-l", "-Xlinker"):
+            link_flags.extend((flag, next(tokens)))
+        elif flag in ("-I", "-isystem", "-iquote", "-include", "-imacros", "-D", "-U", "-x"):
+            compile_flags.extend((flag, next(tokens)))
+        elif flag in ("--sysroot", "-isysroot", "-target", "--target"):
+            option = [flag, next(tokens)]
+            compile_flags.extend(option)
+            link_flags.extend(option)
+        elif flag == "-pthread" or flag.startswith(("-fopenmp", "-stdlib=", "--sysroot=", "--target=")):
+            compile_flags.append(flag)
+            link_flags.append(flag)
+        elif (flag.startswith(("-L", "-l", "-Wl,"))
+              or flag in ("-static", "-shared", "-rdynamic", "-pie", "-no-pie")
+              or flag.endswith((".a", ".so", ".o")) or ".so." in flag):
+            link_flags.append(flag)
+        else:
+            compile_flags.append(flag)
+    return compile_flags, link_flags
 
-def compile_reduced_harness(reduced_harness_path: str, fuzzer_id: int, compilation_flags: list[str]):
-    fuzzer = ProjectUtils.get_fuzzer_binary_by_id(fuzzer_id)
-    compile_cmd = [
-        "clang++",
-        "-fsanitize=address,undefined",
-        "-g",
-        "-O0",
-        "-fstandalone-debug",
-        "-fsanitize=fuzzer",
-        reduced_harness_path,
-        "-o",
-        fuzzer,
+
+def get_compilation_flags(fuzzer_id: int, harness: Path) -> tuple[list[str], list[str]]:
+    build_dir = Path(ProjectUtils.get_build_work_dir(CompileKind.Sanitizer))
+    extra_file = Path(ProjectUtils.get_cache_fuzzer_dir(fuzzer_id)) / "extra_flags.txt"
+    extra = extra_file.read_text().strip() if extra_file.is_file() else ""
+    extra_compile, extra_link = split_extra_flags(extra)
+    compile_flags = [
+        f"-I{ProjectUtils.get_project_header_include_dir()}",
+        f"-I{ProjectUtils.get_project_3rdparty_include_dir(str(build_dir))}",
+        f"-I{harness.parent}",
+        "-fno-sanitize=function",
+        *extra_compile,
     ]
-    compile_cmd.extend(compilation_flags)
-
-    output = subprocess.run(compile_cmd, stderr=subprocess.PIPE)
-    if output.returncode != 0:
-        err_msg = output.stderr.decode("utf-8", errors="ignore")
-        raise Exception(
-            f"[!] Error: Failed to compile reduced harness {reduced_harness_path}!\n {err_msg}\n"
-        )
-    poc = os.path.join(os.path.dirname(fuzzer), "poc")
-    shutil.copy2(fuzzer, poc)
-    print(f"[+] Compilation of reduced harness completed. You can now run the fuzzer ({fuzzer}) and poc ({poc}) to reproduce the crash.")
+    libraries = sorted(str(path) for path in (build_dir / "lib").glob("*.a"))
+    libraries.extend(sorted(ProjectUtils.get_project_3rdparty_libs_from_dir(str(build_dir))))
+    link_flags = ["-Wl,--start-group", *libraries, *extra_link, "-Wl,--end-group"]
+    return compile_flags, link_flags
 
 
-def minimizer(fuzzer_id: int, keep_work_dir: bool):
-    extra_flags = load_extra_flags(fuzzer_id)
-    compilation_flags = get_compilation_flags(extra_flags)
-    print(f"[+] Loaded extra flags for harness {fuzzer_id}: {compilation_flags}")
-    fuzzer_dir = ProjectUtils.get_fuzzer_dir_by_id(fuzzer_id)
-    if not os.path.exists(fuzzer_dir):
-        raise Exception(f"[!] Error: Harness binary not found at {fuzzer_dir}!")
-    harness_path = ProjectUtils.get_harness_path_by_id(fuzzer_id)
-    reduced_harness_path = os.path.join(fuzzer_dir, "poc.cpp")
-    shutil.copy2(harness_path, reduced_harness_path)
+def run_reduction(config: dict, work_dir: Path) -> dict:
+    config_file, result_file = work_dir / "config.json", work_dir / "result.json"
+    config_file.write_text(json.dumps(config))
+    python = os.environ.get("HARNESSMINIMIZER_PYTHON", sys.executable)
+    env = os.environ.copy()
+    # HarnessMinimizer also launches Python crash-check scripts via PATH.
+    env["PATH"] = str(Path(python).absolute().parent) + os.pathsep + env.get("PATH", "")
+    command = [python, "-u", "-c", REDUCTION_SCRIPT, str(config_file), str(result_file)]
+    with subprocess.Popen(command, env=env, start_new_session=True) as process:
+        try:
+            returncode = process.wait(timeout=REDUCTION_TIMEOUT)
+        except BaseException:
+            # Terminating only the Python parent would leave reducer/compiler jobs.
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            except ProcessLookupError:
+                pass
+            finally:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            raise
+    if returncode != 0:
+        raise RuntimeError(f"HarnessMinimizer exited with code {returncode}. See its output above.")
+    result = json.loads(result_file.read_text())
+    if not result["success"]:
+        raise RuntimeError("HarnessMinimizer could not preserve the crash.")
+    return result
 
-    
-    crash_input_file = find_crash_artifact(fuzzer_id)
-    if not crash_input_file:
-        print(f"[!] Warning: Timeout crash cannot be minimized. Please proceed without minimization.")
-        exit(0)
 
-    reduction_result = process(
-        harness_path=harness_path,
-        extra_flags=" ".join(compilation_flags),
-        crash_input=crash_input_file,
-        work_dir=None if not keep_work_dir else os.path.join(ProjectUtils.get_fuzzer_dir_by_id(fuzzer_id), "reduction_work_dir"),
-        use_llm=False,
+def export_poc(result: dict, fuzzer_dir: Path, artifact: Path,
+               compile_flags: list[str], link_flags: list[str], work_dir: Path) -> None:
+    export_dir = work_dir / "export"
+    export_dir.mkdir()
+    source, binary = export_dir / "poc.cpp", export_dir / "poc"
+    shutil.copy2(result["reduced_harness"], source)
+    headers = []
+    for header in result["generated_headers"]:
+        destination = export_dir / Path(header).name
+        shutil.copy2(header, destination)
+        headers.append(destination)
+    command = [
+        "clang++", "-g", "-O0", "-fstandalone-debug", "-fno-omit-frame-pointer",
+        "-fsanitize=address,undefined,fuzzer",
+        f"-fdebug-prefix-map={export_dir}={fuzzer_dir}",
+        *compile_flags, str(source), "-o", str(binary), *link_flags,
+    ]
+    subprocess.run(command, check=True, timeout=60)
+    runtime_args = result["poc_runtime_args"]
+    env = os.environ.copy()
+    env["ASAN_OPTIONS"] = "exitcode=77:symbolize=1:handle_abort=1"
+    env["UBSAN_OPTIONS"] = "print_stacktrace=1:halt_on_error=1:exitcode=77"
+    replay = subprocess.run(
+        [str(binary), *runtime_args, str(artifact)], env=env,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        errors="replace", timeout=30,
     )
-    if not reduction_result:
-        print(f"[!] Warning: Harness reduction failed. Please proceed with the original harness at {harness_path}")
-        exit(0)
-    shutil.copy2(reduction_result, reduced_harness_path)
-    print(f"[+] Reduction completed. Please proceed your analysis with the reduced harness at: {reduced_harness_path}")
-    compile_reduced_harness(reduced_harness_path, fuzzer_id, compilation_flags)
+    (work_dir / "poc-replay.log").write_text(replay.stdout)
+    crash_markers = ("ERROR: AddressSanitizer", "ERROR: UndefinedBehaviorSanitizer",
+                     "runtime error:", "ERROR: libFuzzer")
+    if replay.returncode == 0 or not any(marker in replay.stdout for marker in crash_markers):
+        raise RuntimeError("The exported PoC did not reproduce a sanitizer/libFuzzer crash.\n" + replay.stdout[-4000:])
+    # Publish only a compiled, replayed result. Existing PoCs survive failed attempts.
+    for path in [*headers, source, binary]:
+        shutil.copy2(path, fuzzer_dir / path.name)
+    reproduction = shlex.join([str(fuzzer_dir / "poc"), *runtime_args, str(artifact)])
+    print(f"[+] Reduced source: {fuzzer_dir / 'poc.cpp'}")
+    print(f"[+] Reproduce: {reproduction}")
+    if runtime_args:
+        print(f"[+] Additional libFuzzer arguments (also pass these when debugging): {shlex.join(runtime_args)}")
 
+
+def minimizer(fuzzer_id: int, crash_artifact_path: str, keep_work_dir: bool = False,
+              jobs: int = 4) -> None:
+    if fuzzer_id < 0 or not 1 <= jobs <= 63:
+        raise ValueError("fuzzer_id must be nonnegative and jobs must be between 1 and 63.")
+    artifact = Path(crash_artifact_path).resolve()
+    if not artifact.is_file():
+        raise ValueError(f"Crash input is not a file: {artifact}")
+    if artifact.name.startswith("slow-unit-"):
+        raise ValueError("Slow-unit artifacts are not crashes and cannot be minimized here.")
+    harness = Path(ProjectUtils.get_harness_path_by_id(fuzzer_id)).resolve()
+    if not harness.is_file():
+        raise ValueError(f"Harness source not found: {harness}")
+    fuzzer_dir = Path(ProjectUtils.get_fuzzer_dir_by_id(fuzzer_id)).resolve()
+    compile_flags, link_flags = get_compilation_flags(fuzzer_id, harness)
+    work_context = (nullcontext(tempfile.mkdtemp(prefix="reduction-", dir=fuzzer_dir))
+                    if keep_work_dir else tempfile.TemporaryDirectory(prefix="reduction-", dir=fuzzer_dir))
+    with work_context as work:
+        work_dir = Path(work)
+        if keep_work_dir:
+            print(f"[+] Reduction working directory: {work_dir}", flush=True)
+        result = run_reduction({
+            "harness_path": str(harness),
+            "crash_input": str(artifact),
+            "compile_flags": shlex.join(compile_flags),
+            "link_flags": shlex.join(link_flags),
+            "work_dir": str(work_dir / "reducer"),
+            "tool": "treereduce",
+            "compilation_mode": "pch",
+            "amortize_link": any(flag.endswith((".a", ".so")) for flag in link_flags),
+            "symbolize": False,
+            "stable": True,
+            "jobs": jobs,
+            "reduction_timeout_seconds": 900,
+        }, work_dir)
+        export_poc(result, fuzzer_dir, artifact, compile_flags, link_flags, work_dir)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("fuzzer_id", type=int)
+    parser.add_argument("crash_artifact_path", help="The exact crash input to preserve.")
+    parser.add_argument("-w", "--work-dir", action="store_true", help="Keep reduction intermediates for debugging.")
+    parser.add_argument("-j", "--jobs", type=int, default=4, help="Concurrent reduction checks (1-63; default: 4).")
+    args = parser.parse_args()
+    try:
+        minimizer(args.fuzzer_id, args.crash_artifact_path, args.work_dir, args.jobs)
+    except Exception as error:
+        print(f"[!] Harness minimization failed: {error}", file=sys.stderr)
+        print("[!] Continue with the original harness and fuzzer. Do not use a PoC from an earlier call.", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Harness Minimizer with retained crash behavior")
-    parser.add_argument("fuzzer_id", type=int, help="The harness (or fuzzer) instance ID to generate minimized harness for.")
-    parser.add_argument("-w", "--work-dir", action="store_true", help="Reserve the working directory after reduction for debugging purposes.")
-    args = parser.parse_args()
-    minimizer(args.fuzzer_id, args.work_dir)
-
+    raise SystemExit(main())

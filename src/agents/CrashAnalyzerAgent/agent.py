@@ -21,6 +21,7 @@ class CrashAnalyzerAgent(BaseAgent):
             "scroll_up",
             "scroll_down",
             "crash_artifact_analysis",
+            "harness_minimizer",
             "crash_debugger",
             "generate_crash_report",
             "exit",

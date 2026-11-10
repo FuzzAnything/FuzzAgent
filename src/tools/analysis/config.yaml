@@ -12,15 +12,23 @@ tools:
       directory.
   harness_minimizer:
     timeout: 1200
-    signature: harness_minimizer <fuzzer_id>
-    docstring: Minimize the harness code while retaining the crash-triggering behavior.
-      The minimized harness will be compiled into a new fuzzer binary for you to further
-      analyze the crash.
+    signature: harness_minimizer <fuzzer_id> <crash_artifact_path>
+    docstring: Use HarnessMinimizer to reduce the harness for the specified crash.
+      On success, write poc.cpp, any required generated headers, and a separate
+      poc executable beside the original fuzzer. The original harness and fuzzer
+      remain unchanged. Use the printed reproduction command and runtime arguments
+      when debugging. On failure, continue with the original harness and record why
+      reduction failed; do not use a PoC left from an earlier call.
     arguments:
     - name: fuzzer_id
       type: integer
       description: The fuzzer (or harness) instance ID to generate minimized harness
         for.
+      required: true
+    - name: crash_artifact_path
+      type: string
+      description: Path to the exact crash input being investigated, not a directory
+        or a slow-unit artifact.
       required: true
   crash_artifact_analysis:
     timeout: 60

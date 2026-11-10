@@ -11,7 +11,7 @@ ENV TZ=Asia/Shanghai
 # Install dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        bash git sudo jq curl wget gzip locales \
+        bash git sudo jq curl wget gzip locales patch \
         build-essential cmake pkg-config lld ninja-build \
         binutils binutils-dev autoconf automake libtool libncurses5-dev libgdbm-dev libnss3-dev liblzma-dev zlib1g-dev libyaml-dev graphviz libgraphviz-dev \
         libicu-dev libcurl4-openssl-dev libssl-dev libsqlite3-dev ruby-dev libreadline-dev libffi-dev libbz2-dev libc++-dev libc++abi-dev libc6-dev libgcc-9-dev tzdata \
@@ -79,7 +79,6 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
     echo 'source $HOME/.cargo/env' >> ~/.bashrc
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN cargo install -F dojo casr
-RUN cargo install treereduce-c
 
 # Install Ruby
 # RUN git clone https://github.com/rbenv/rbenv.git ~/.rbenv && \
@@ -132,6 +131,20 @@ ENV GOPATH=/go
 ENV PATH=$PATH:$GOPATH/bin
 
 RUN go install github.com/boyter/scc/v3@latest
+
+# Install HarnessMinimizer and its patched reduction engine separately from
+# FuzzAgent's project environment, which is synchronized when the agent starts.
+ARG HARNESSMINIMIZER_REF=fc03c2e3a326d6f55ee03a2300685197583b5295
+ARG HARNESSMINIMIZER_BUILD_JOBS=2
+RUN git init /opt/HarnessMinimizer && \
+    git -C /opt/HarnessMinimizer remote add origin https://github.com/FuzzAnything/HarnessMinimizer.git && \
+    git -C /opt/HarnessMinimizer fetch --depth 1 --no-tags origin "$HARNESSMINIMIZER_REF" && \
+    git -C /opt/HarnessMinimizer checkout --detach FETCH_HEAD && \
+    uv sync --project /opt/HarnessMinimizer --frozen && \
+    /opt/HarnessMinimizer/.venv/bin/python /opt/HarnessMinimizer/tools/treereduce/install.py --jobs "$HARNESSMINIMIZER_BUILD_JOBS" && \
+    /opt/HarnessMinimizer/.tools/bin/treereduce-c --harnessminimizer-supervisor-version
+ENV HARNESSMINIMIZER_PYTHON="/opt/HarnessMinimizer/.venv/bin/python" \
+    HARNESSMINIMIZER_TREEREDUCE="/opt/HarnessMinimizer/.tools/bin/treereduce-c"
 
 # We Must mapping our source code to this path in the container (DEV Phase)
 WORKDIR /root/FuzzAgent

@@ -76,6 +76,11 @@ def generate_crash_report(fuzzer_id: int, crash_artifact_path: str, triage: str,
     poc_file_path = os.path.join(fuzzer_dir, "poc.cpp")
     if os.path.exists(poc_file_path):
         shutil.copy2(poc_file_path, os.path.join(crash_save_dir, os.path.basename(poc_file_path)))
+        if re.search(r'^\s*#\s*include\s*"harness_values\.h"',
+                     Path(poc_file_path).read_text(), re.MULTILINE):
+            # HarnessMinimizer may move the crashing input into this header.
+            shutil.copy2(os.path.join(fuzzer_dir, "harness_values.h"),
+                         os.path.join(crash_save_dir, "harness_values.h"))
     
     poc_path = os.path.join(fuzzer_dir, "poc")
     if os.path.exists(poc_path):
