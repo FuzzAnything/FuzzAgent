@@ -24,12 +24,11 @@ third-party code under either option. Upstream copyright notices, license
 texts, and permissions are preserved. See THIRD_PARTY_NOTICES and
 THIRD_PARTY_LICENSES/ for component details and license texts.
 
-Perses is a separate, optional external program and is not part of the
-FuzzAgent distribution. It and other separately installed external
-programs retain their own licenses. A commercial license for FuzzAgent
-does not cover Perses or grant exceptions to its GPL-3.0-or-later terms.
-FuzzAgent's installer and command-line adapter are covered by this file;
-see THIRD_PARTY_NOTICES for details of the external integration.
+Separately installed dependencies and programs included in a container
+retain their own licenses. A commercial license for FuzzAgent does not
+relicense those components or waive their notice, source-distribution,
+relinking, or network-source obligations. See THIRD_PARTY_NOTICES for
+the components and distribution boundaries.
 
 -------------------------------------------------------------------------------
 

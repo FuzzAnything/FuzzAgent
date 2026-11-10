@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+# Adapted for FuzzAgent.
+# See THIRD_PARTY_NOTICES and THIRD_PARTY_LICENSES/Apache-2.0.txt.
 ################################################################################
 """Helper script for upgrading a profraw file to latest version."""
 

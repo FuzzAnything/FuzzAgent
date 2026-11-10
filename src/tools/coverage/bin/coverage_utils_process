@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # Copyright 2018 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
-# found in the LICENSE file.
+# found in THIRD_PARTY_LICENSES/Chromium.txt.
+# Adapted for FuzzAgent.
+# See THIRD_PARTY_NOTICES.
 #
-# The script intentionally does not have a shebang, as it is Py2/Py3 compatible.
+# The upstream script had no shebang; FuzzAgent installs it as a Python 3 tool.
 
 import argparse
 from collections import defaultdict

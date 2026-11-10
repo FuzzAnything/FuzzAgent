@@ -1,0 +1,11 @@
+This profile contains code derived from Moby's default seccomp profile:
+https://github.com/moby/moby/blob/v27.5.1/profiles/seccomp/default.json
+
+Upstream license: Apache-2.0.
+See ../THIRD_PARTY_LICENSES/Apache-2.0.txt and
+../THIRD_PARTY_LICENSES/Moby-NOTICE.txt.
+
+FuzzAgent's profile changes clone/clone3, personality and unshare permissions
+and removes some capability/argument restrictions compared with that reference.
+
+Keep this notice with default-seccomp.json when copying the profile separately.

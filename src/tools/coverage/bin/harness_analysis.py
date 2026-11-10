@@ -10,12 +10,11 @@ from typing import List, Set, Optional
 warnings.simplefilter("ignore", category=FutureWarning)
 
 try:
-    from tree_sitter_languages import get_language, get_parser
     from tree_sitter import Language, Parser
     import tree_sitter_cpp as ts_cpp
 except ImportError:
-    print("Error: tree-sitter-languages library is required")
-    print("Please run: pip install tree-sitter-languages")
+    print("Error: tree-sitter and tree-sitter-cpp libraries are required")
+    print("Please run: pip install tree-sitter tree-sitter-cpp")
     sys.exit(1)
 
 CPP_LANGUAGE = Language(ts_cpp.language())

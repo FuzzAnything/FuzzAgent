@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Adapted from SWE-agent (MIT) for FuzzAgent.
+# Copyright (c) 2024 John Yang, Carlos E. Jimenez, Alexander Wettig,
+# Shunyu Yao, Karthik Narasimhan, Ofir Press.
+# See THIRD_PARTY_NOTICES and THIRD_PARTY_LICENSES/SWE-agent.txt.
+
 source defaults.sh
 
 # @yaml

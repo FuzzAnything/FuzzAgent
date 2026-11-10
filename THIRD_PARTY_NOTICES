@@ -1,0 +1,96 @@
+FuzzAgent third-party notices
+============================
+
+FuzzAgent is distributed as a whole under AGPL-3.0-only or a separately
+negotiated commercial license, as described in LICENSE. Neither option
+removes the conditions of upstream code or separately installed software.
+The license texts for code included in this repository are in
+THIRD_PARTY_LICENSES/. Preserve them when distributing copies, including
+installed tools and containers. No endorsement by upstream authors is implied.
+
+Google Agent2Agent (A2A) Python samples
+-------------------------------------
+Upstream: https://github.com/a2aproject/A2A (originally google/A2A)
+Reference: v0.1.0, commit ce95d60c49c44511b73a391c798e8e8c814bce66
+Source: https://github.com/a2aproject/A2A/tree/v0.1.0/samples/python/common
+License: Apache-2.0; full text: THIRD_PARTY_LICENSES/Apache-2.0.txt
+License source: https://github.com/a2aproject/A2A/blob/v0.1.0/LICENSE
+
+Applicable local files:
+- src/a2a/types.py
+- src/a2a/client/{__init__,client,card_resolver}.py
+- src/a2a/server/{__init__,server,task_manager,utils}.py
+- src/a2a/utils/in_memory_cache.py
+
+These files contain adapted sample code. Local differences include imports
+under src.a2a, model/serialization and request handling changes, timeout and
+agent-card handling, and formatting.
+The referenced upstream tree has no root NOTICE file.
+
+Chromium code coverage tools
+----------------------------
+Copyright 2018 The Chromium Authors (coverage_utils.py and local derivative).
+Upstream: https://chromium.googlesource.com/chromium/src/tools/code_coverage/
+Reference: 62596f373884881cd816f109b9674d2e1de3117a
+Source: https://chromium.googlesource.com/chromium/src/tools/code_coverage/+/62596f373884881cd816f109b9674d2e1de3117a/coverage_utils.py
+License: BSD-3-Clause; full text: THIRD_PARTY_LICENSES/Chromium.txt
+License source: https://chromium.googlesource.com/chromium/src/+/main/LICENSE
+
+Applicable local file: src/tools/coverage/bin/coverage_utils_process.
+This is an adapted copy, with a Python 3 shebang and changes to report
+generation/command-line handling.
+
+docker/Dockerfile also fetches upstream coverage_utils.py, html_templates/,
+and static/ into the image. It renames the script to coverage_utils and adds
+a shebang. These separately downloaded files retain the upstream BSD terms.
+The templates/CSS retain their own upstream copyright notices. Preserve
+those notices when distributing generated reports containing those assets.
+
+Google OSS-Fuzz profile updater
+-------------------------------
+Copyright 2021 Google LLC
+Upstream: https://github.com/google/oss-fuzz
+Source: https://github.com/google/oss-fuzz/blob/master/infra/base-images/base-runner/profraw_update.py
+License: Apache-2.0; full text: THIRD_PARTY_LICENSES/Apache-2.0.txt
+License source: https://github.com/google/oss-fuzz/blob/master/LICENSE
+
+Applicable local file: src/tools/fuzzer/bin/profraw_update.
+It retains the upstream copyright/license header and is installed without
+the .py suffix. The local copy differs from the upstream comparison in its
+profile-data offset handling.
+
+SWE-agent file tools
+--------------------
+Copyright (c) 2024 John Yang, Carlos E. Jimenez, Alexander Wettig,
+Shunyu Yao, Karthik Narasimhan, Ofir Press
+Upstream: https://github.com/SWE-agent/SWE-agent
+Reference: v0.7.0, config/commands/{defaults.sh,edit_linting.sh,search.sh}
+Source: https://github.com/SWE-agent/SWE-agent/tree/v0.7.0/config/commands
+License: MIT; full text: THIRD_PARTY_LICENSES/SWE-agent.txt
+License source: https://github.com/SWE-agent/SWE-agent/blob/v0.7.0/LICENSE
+
+Applicable local files in src/tools/file/bin/:
+defaults.sh, edit, open, goto, scroll_down, scroll_up, find_file,
+search_dir, search_file. Related command descriptions are in
+src/tools/file/config.yaml and interfaces.md.
+
+Adaptations split shell functions into executable tools, add local imports,
+scroll warnings and editing/backup behavior, and change command descriptions.
+
+Moby / Docker seccomp profile
+-----------------------------
+Docker; Copyright 2012-2017 Docker, Inc. (upstream NOTICE)
+Upstream: https://github.com/moby/moby
+Reference: v27.5.1, profiles/seccomp/default.json
+Source: https://github.com/moby/moby/blob/v27.5.1/profiles/seccomp/default.json
+License: Apache-2.0; full text: THIRD_PARTY_LICENSES/Apache-2.0.txt
+License source: https://github.com/moby/moby/blob/v27.5.1/LICENSE
+Upstream NOTICE: THIRD_PARTY_LICENSES/Moby-NOTICE.txt (preserved verbatim).
+
+Applicable local file: docker/default-seccomp.json.
+The local profile changes clone/clone3, personality and unshare rules and
+removes some capability/argument restrictions relative to the reference.
+See docker/default-seccomp.NOTICE for its accompanying change notice.
+The upstream NOTICE also mentions creack/pty; that library is not included
+in this repository by the seccomp profile. The supplied Compose template
+currently selects seccomp=unconfined rather than this profile.

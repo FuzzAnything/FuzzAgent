@@ -1,3 +1,7 @@
+# Contains code from Google Agent2Agent samples (Apache-2.0).
+# Adapted for FuzzAgent.
+# See THIRD_PARTY_NOTICES and THIRD_PARTY_LICENSES/Apache-2.0.txt.
+
 from typing import Union, Any
 from pydantic import BaseModel, Field, TypeAdapter
 from typing import Literal, List, Annotated, Optional

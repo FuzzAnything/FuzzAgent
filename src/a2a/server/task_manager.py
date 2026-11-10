@@ -1,3 +1,7 @@
+# Contains code from Google Agent2Agent samples (Apache-2.0).
+# Adapted for FuzzAgent.
+# See THIRD_PARTY_NOTICES and THIRD_PARTY_LICENSES/Apache-2.0.txt.
+
 from abc import ABC, abstractmethod
 from typing import Union, AsyncIterable, List
 from src.a2a.types import Task

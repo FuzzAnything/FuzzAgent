@@ -1,5 +1,10 @@
 #!/bin/bash
 
+# Adapted from SWE-agent (MIT) for FuzzAgent.
+# Copyright (c) 2024 John Yang, Carlos E. Jimenez, Alexander Wettig,
+# Shunyu Yao, Karthik Narasimhan, Ofir Press.
+# See THIRD_PARTY_NOTICES and THIRD_PARTY_LICENSES/SWE-agent.txt.
+
 # Source the defaults to get helper functions
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/defaults.sh"
